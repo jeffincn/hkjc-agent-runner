@@ -1,0 +1,23 @@
+{
+  "name": "hkjc-agent-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Receives hkjc-push/1.0 webhooks from hkjc-data-worker, stores them in D1, and runs multi-role analysis via Queues.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "roles:import": "node scripts/import-roles.mjs",
+    "dev": "wrangler dev --local --persist-to .wrangler/state",
+    "db:migrate:local": "wrangler d1 migrations apply hkjc_agent_runner --local",
+    "db:migrate:remote": "wrangler d1 migrations apply hkjc_agent_runner --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250417.0",
+    "fflate": "^0.8.2",
+    "miniflare": "4.20250906.0",
+    "typescript": "^5.8.3",
+    "vitest": "~3.0.9",
+    "wrangler": "4.35.0"
+  }
+}

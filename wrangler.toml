@@ -1,0 +1,44 @@
+name = "hkjc-agent-runner"
+account_id = "edfe9a8d7c9b1ebbc544fd4c84b799a8"
+main = "src/index.ts"
+compatibility_date = "2025-04-17"
+compatibility_flags = ["nodejs_compat"]
+
+workers_dev = true
+routes = [
+  { pattern = "hkjc-agent.cf-connect.top", custom_domain = true }
+]
+
+[vars]
+# Seconds to wait before analysing an odds_update, so bursts collapse to the latest snapshot.
+ODDS_COALESCE_SECONDS = "45"
+# Max cross-examination rounds including the independent round (hard cap 3).
+MAX_ROUNDS = "3"
+# Queue consumer attempts before an event is marked failed.
+MAX_PROCESS_ATTEMPTS = "4"
+# OPENAI_MODEL must be set explicitly (no default is baked in).
+# OPENAI_MODEL = ""
+# Optional: base URL of hkjc-data-worker for horse/injury/result detail lookups.
+# HKJC_API_BASE = "https://hkjc.cf-connect.top"
+# Secrets (wrangler secret put): PUSH_SECRET, OPENAI_API_KEY, RUNNER_API_TOKEN, HKJC_API_TOKEN
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hkjc_agent_runner"
+database_id = "5a4b47b8-0ff0-4f01-9689-18069bdafd79"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "EVENTS_QUEUE"
+queue = "hkjc-agent-events"
+
+[[queues.consumers]]
+queue = "hkjc-agent-events"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "hkjc-agent-events-dlq"
+
+# Outbox dispatcher + stale-lease sweeper.
+[triggers]
+crons = ["* * * * *"]

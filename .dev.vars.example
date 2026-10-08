@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local dev. Never commit real values.
+PUSH_SECRET=dev-only-shared-secret
+RUNNER_API_TOKEN=dev-only-runner-token
+OPENAI_API_KEY=
+OPENAI_MODEL=
+HKJC_API_BASE=
+HKJC_API_TOKEN=
