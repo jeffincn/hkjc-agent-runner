@@ -14,6 +14,10 @@ function bearerOk(request: Request, token: string | undefined): Response | null 
 }
 
 export async function handleHealth(env: Env): Promise<Response> {
+  return json(200, await healthBody(env));
+}
+
+export async function healthBody(env: Env): Promise<Record<string, unknown>> {
   const counts = await env.DB.prepare(
     `SELECT status, COUNT(*) AS n FROM inbox_events GROUP BY status`,
   ).all<{ status: string; n: number }>();
@@ -23,7 +27,7 @@ export async function handleHealth(env: Env): Promise<Response> {
   const rejected = await env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_rejections`).first<{ n: number }>();
   const meta = await getMetaMap(env.DB);
   const m = (k: string) => meta[k]?.value ?? null;
-  return json(200, {
+  return {
     ok: true,
     service: "hkjc-agent-runner",
     signature: env.PUSH_SECRET ? "required" : "not_configured",
@@ -38,7 +42,7 @@ export async function handleHealth(env: Env): Promise<Response> {
     last_model_ok: m("last_model_ok"),
     last_model_error: m("last_model_error"),
     last_dispatcher_run: m("last_dispatcher_run"),
-  });
+  };
 }
 
 export async function handleGetRun(request: Request, env: Env, runId: string): Promise<Response> {

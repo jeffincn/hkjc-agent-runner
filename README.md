@@ -26,13 +26,14 @@ data worker 上要设的是：
 
 不要把 secret 写进仓库或聊天。
 
-### 现在还接不上的
+### GPT 接入（MCP）
 
-ChatGPT 的自定义 MCP 连接器需要一个公网 HTTPS MCP 地址。这个服务目前没有 MCP 端点，只有下面这三个 HTTP 路径，所以 GPT 还不能以 MCP 方式接入。
+只读 MCP 地址：`https://hkjc-agent.cf-connect.top/mcp`，不认证。工具清单和 ChatGPT、Responses API 的接法见 [docs/GPT-MCP.md](docs/GPT-MCP.md)。
 
 | 路径 | 谁能调 | 作用 |
 |---|---|---|
 | `POST /webhook` | data worker | 收推送 |
+| `POST /mcp` | 公开，只读 | GPT 通过 MCP 查状态和分析 |
 | `GET /health` | 公开 | 活着与否 |
 | `GET /runs/:id` | `Authorization: Bearer <RUNNER_API_TOKEN>` | 查一次分析 |
 
