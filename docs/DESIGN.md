@@ -23,7 +23,7 @@
 
 1. `POST /webhook` 读原始字节。设了 `PUSH_SECRET` 就校验 HMAC，失败 401，不存原文。
 2. 同一条 D1 batch 写入 inbox 和 pending outbox，再 202 `{"received":true}`。重复键只增加 `duplicate_count`，不新建 outbox。
-3. `waitUntil` 投递 Queue。失败则 outbox 留在 pending，cron 每分钟按 30s、1m、5m、15m、30m 重试。已确认的事件不会因为 Queue 失败而丢掉。
+3. `waitUntil` 投递 Queue。失败则 outbox 留在 pending，cron 每 5 分钟检查一次，按 30s、1m、5m、15m、30m 退避重试（实际最快 5 分钟）。已确认的事件不会因为 Queue 失败而丢掉。
 4. Consumer 用租约认领。同一事件已完成就直接 ack，不重跑 Agent。
 5. `odds_update` 延迟 45 秒，只分析该场 `odds_latest` 仍指向自己的快照，更旧的标 superseded。
 6. 赛马事件最多三轮：全部已加载角色独立判断、路由相关角色交叉质疑、主持人汇总。概率不在 0 到 1 就原轮修复一次，仍非法则该步作废，不进入结论。

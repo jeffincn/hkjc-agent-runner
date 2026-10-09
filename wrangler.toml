@@ -41,4 +41,4 @@ dead_letter_queue = "hkjc-agent-events-dlq"
 
 # Outbox dispatcher + stale-lease sweeper.
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/5 * * * *"]
