@@ -46,6 +46,10 @@ export function routeEvent(env: PushEnvelope, oddsCoalesceSeconds: number): Rout
     case "backfill_progress":
     case "whitelist_alert":
       return { workflow: "record_only", phase: "none", delaySeconds: 0, roleTags: [] };
+    case "odds_delta":
+      return { workflow: "record_only", phase: "none", delaySeconds: 0, roleTags: [], note: "hkjc-push/1.1 odds_delta: appended to odds_ledger" };
+    case "no_update":
+      return { workflow: "record_only", phase: "none", delaySeconds: 0, roleTags: [], note: "hkjc-push/1.1 heartbeat: updates stream_state" };
     case "runs_update":
     case "changes":
       return {

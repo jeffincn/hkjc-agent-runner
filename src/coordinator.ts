@@ -4,6 +4,8 @@ import { envInt, nowIso } from "./env";
 import { ModelCallError, MODERATOR_SCHEMA, ROLE_SCHEMA, type ModelClient } from "./openai";
 import { allRoles, type RoleDef } from "./roles";
 import { setInboxStatus, setMeta, type InboxRow } from "./store";
+import { PRE_RACE_INPUT_EVENTS } from "./quality";
+import { storeValidation, validateProbabilities, type ProbInput, type RaceField } from "./validation";
 
 export interface RoleOutput {
   stance: string;
@@ -284,6 +286,17 @@ export async function runAnalysis(env: Env, inbox: InboxRow, model: ModelClient)
     if (keep !== "all") envelope.races = envelope.races.filter((r) => keep.includes(r.race_no));
   }
 
+  if (phase === "pre_race" && PRE_RACE_INPUT_EVENTS.has(envelope.event)) {
+    // Races that had started when the event arrived never feed pre-race analysis.
+    const recv = Date.parse(inbox.received_at);
+    const open = envelope.races.filter((r) => !r.post_time || !(Date.parse(r.post_time) <= recv));
+    if (envelope.races.length > 0 && open.length === 0) {
+      await setInboxStatus(env.DB, inbox.id, "skipped", { last_error: "post_start: all races had started on receipt" });
+      return;
+    }
+    envelope.races = open;
+  }
+
   let run = await env.DB.prepare(`SELECT id FROM analysis_runs WHERE inbox_id = ?`).bind(inbox.id).first<{ id: string }>();
   if (!run) {
     const id = crypto.randomUUID();
@@ -314,6 +327,8 @@ export async function runAnalysis(env: Env, inbox: InboxRow, model: ModelClient)
       else invalid.push(role.id);
     }
   }
+
+  await storeValidation(env.DB, run.id, validateProbabilities(probRows(envelope, independent), raceFields(envelope)), nowIso());
 
   const crossTags = new Set(crossTagsFor(inbox.workflow));
   const crossRoles = roles.filter((r) => r.tags.some((t) => crossTags.has(t)));
@@ -371,6 +386,39 @@ export async function runAnalysis(env: Env, inbox: InboxRow, model: ModelClient)
   }
   await setInboxStatus(env.DB, inbox.id, "done", { run_id: run.id, last_error: null });
   await setMeta(env.DB, "last_model_ok", now);
+}
+
+const SCRATCHED = /scratch|withdrawn|退出/i;
+
+/** Active (non-scratched) runners per race from the event payload. */
+export function raceFields(envelope: PushEnvelope): Map<number, RaceField> {
+  const m = new Map<number, RaceField>();
+  for (const r of envelope.races) {
+    if (typeof r.race_no !== "number") continue;
+    const runners = r.runners ?? [];
+    const active = new Set(runners.filter((x) => !SCRATCHED.test(x.status ?? "")).map((x) => x.horse_no));
+    m.set(r.race_no, { active, starters: active.size });
+  }
+  return m;
+}
+
+/**
+ * Role picks -> validation rows. Picks carry horse_no only; they map to a race when the event
+ * covers exactly one race (or the pick names race_no). HKJC odds in the payload are total return.
+ */
+export function probRows(envelope: PushEnvelope, outputs: { role: RoleDef; output: RoleOutput }[]): ProbInput[] {
+  const single = envelope.races.length === 1 ? envelope.races[0].race_no : null;
+  const rows: ProbInput[] = [];
+  for (const { role, output } of outputs) {
+    for (const pick of output.picks) {
+      const named = (pick as unknown as { race_no?: unknown }).race_no;
+      const raceNo = typeof named === "number" ? named : single;
+      const runner = envelope.races.find((r) => r.race_no === raceNo)?.runners?.find((x) => x.horse_no === pick.horse_no);
+      rows.push({ role_id: role.id, race_no: raceNo, runner_no: pick.horse_no, bet_type: "WIN", p: pick.p_win, odds: runner?.win_odds ?? null, odds_basis: "total_return" });
+      rows.push({ role_id: role.id, race_no: raceNo, runner_no: pick.horse_no, bet_type: "PLA", p: pick.p_place, odds: runner?.place_odds ?? null, odds_basis: "total_return" });
+    }
+  }
+  return rows;
 }
 
 function crossTagsFor(workflow: string | null): string[] {

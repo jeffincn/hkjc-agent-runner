@@ -21,6 +21,10 @@ https://hkjc-agent.cf-connect.top/mcp
 | `get_race_analysis` | `meeting_date`、`venue`、`race_no` | 单场赛前观点（是否已锁定）和涉及这场的分析 |
 | `search` | `query` | 按日期、场地、流程、状态搜分析，返回可给 `fetch` 用的 id |
 | `fetch` | `id` | 一次分析的完整文档 |
+| `get_ledger` | `meeting_date`（必填）、`race_no`、`runner_no`、`bet_type`(WIN/PLA)、`since_seq`、`exclude_post_race`、`limit`(1–500，默认 200) | 从追加型赔率账本回放赔率轨迹，按 seq 再按到达顺序；`post_race=true` 的行是开跑后才收到的，不能用于赛前分析 |
+| `get_data_quality` | `meeting_date` | 最后事件时间（HKT）、最后 seq、未补的 seq 缺口、各质量标记计数、延迟统计、被隔离的分析字段数、流状态（ok/stale/broken/no_data）和总体 `data_quality_status` |
+
+`list_recent_events` 现在也返回 `received_at_hkt`、`event_id`、`seq`、三项延迟、`quality_flags` 和 `post_race`。`get_run` 多了 `validation`：每个角色每匹马 WIN/PLA 的 P、赔率、Fair、EV，或隔离原因。
 
 `search` 和 `fetch` 按 ChatGPT 连接器常用的格式返回。
 

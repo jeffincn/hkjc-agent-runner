@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { hmacSha256Hex } from "../src/crypto";
 import type { Env, QueueMessageBody } from "../src/env";
@@ -13,15 +13,29 @@ async function freshDb(): Promise<D1Database> {
     d1Databases: ["DB"],
   });
   const db = await mf.getD1Database("DB");
-  for (const table of ["run_steps", "analysis_runs", "race_opinions", "odds_latest", "outbox", "inbox_events", "webhook_rejections", "runner_meta"]) {
+  for (const table of ["odds_ledger", "analysis_validation", "seq_gaps", "stream_state", "race_schedule", "run_steps", "analysis_runs", "race_opinions", "odds_latest", "outbox", "inbox_events", "webhook_rejections", "runner_meta"]) {
     await db.exec(`DROP TABLE IF EXISTS ${table}`);
   }
-  const sql = readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8").replace(/--[^\n]*/g, "");
-  for (const stmt of sql.split(";")) {
-    const q = stmt.trim();
-    if (q) await db.prepare(q).run();
+  const dir = new URL("../migrations/", import.meta.url);
+  for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+    const sql = readFileSync(new URL(file, dir), "utf8").replace(/--[^\n]*/g, "");
+    for (const q of splitSql(sql)) await db.prepare(q).run();
   }
   return db;
+}
+
+/** Split on ";" but keep CREATE TRIGGER ... BEGIN ... END; blocks whole. */
+function splitSql(sql: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  for (const part of sql.split(";")) {
+    buf += part;
+    const open = /\bBEGIN\b/i.test(buf) && !/\bEND\s*$/i.test(buf.trim());
+    if (open) { buf += ";"; continue; }
+    if (buf.trim()) out.push(buf.trim());
+    buf = "";
+  }
+  return out;
 }
 
 let chain: Promise<unknown> = Promise.resolve();
