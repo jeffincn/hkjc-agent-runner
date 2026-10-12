@@ -23,6 +23,7 @@ https://hkjc-agent.cf-connect.top/mcp
 | `fetch` | `id` | 一次分析的完整文档 |
 | `get_ledger` | `meeting_date`（必填）、`race_no`、`runner_no`、`bet_type`(WIN/PLA)、`since_seq`、`exclude_post_race`、`limit`(1–500，默认 200) | 从追加型赔率账本回放赔率轨迹，按 seq 再按到达顺序；`post_race=true` 的行是开跑后才收到的，不能用于赛前分析 |
 | `get_data_quality` | `meeting_date` | 最后事件时间（HKT）、最后 seq、未补的 seq 缺口、各质量标记计数、延迟统计、被隔离的分析字段数、流状态（ok/stale/broken/no_data）和总体 `data_quality_status` |
+| `get_odds_movement` | `race_date`（必填，YYYY-MM-DD）、`race_no`、`horse`（马号或中/英文马名片段）、`bet_type`(WIN/PLA)、`exclude_post_race`（默认 true）、`include_changes`（默认 true） | 由赔率账本计算的赔率变化密度：按 场次+马+WIN/PLA 和每分钟（HKT）分桶给出变化次数、每次变化的绝对值和百分比、隐含概率（1/赔率）变化、相对首个赔率的累计漂移，以及 `sudden_jump`/`sudden_drop`/`prob_shift`/`burst` 标记；阈值见 `thresholds` 字段与 DESIGN.md |
 
 `list_recent_events` 现在也返回 `received_at_hkt`、`event_id`、`seq`、三项延迟、`quality_flags` 和 `post_race`。`get_run` 多了 `validation`：每个角色每匹马 WIN/PLA 的 P、赔率、Fair、EV，或隔离原因。
 

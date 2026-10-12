@@ -4,6 +4,7 @@ import type { Env } from "./env";
 import { healthBody } from "./http";
 import { nowMs, toHkt } from "./env";
 import { QUALITY_FLAGS, streamStatus } from "./quality";
+import { loadOddsMovement } from "./oddsMovement";
 
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_VERSION = SUPPORTED_VERSIONS[0];
@@ -136,6 +137,25 @@ const TOOLS = [
       type: "object",
       properties: { meeting_date: { type: "string", description: "YYYY-MM-DD" } },
       required: ["meeting_date"],
+      additionalProperties: false,
+    },
+    annotations: READ_ONLY,
+  },
+  {
+    name: "get_odds_movement",
+    title: "Odds movement / change density",
+    description: "Odds change density computed from the append-only odds ledger, per race + horse + WIN/PLA and per HKT minute bucket: change count, each change's absolute and % move, implied probability (1/odds) change, cumulative drift from the first seen odds, and flags sudden_jump (odds up >= 15% in one change), sudden_drop (odds down >= 15%), prob_shift (implied probability moves >= 3 points) and burst (>= 4 changes in one minute; upstream samples about every 10 s). Use it to spot horses being pushed in or out.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        race_date: { type: "string", description: "Meeting date YYYY-MM-DD" },
+        race_no: { type: "integer", minimum: 1, maximum: 20 },
+        horse: { type: "string", description: "Runner number (e.g. \"7\") or part of the Chinese or English horse name." },
+        bet_type: { type: "string", enum: ["WIN", "PLA"] },
+        exclude_post_race: { type: "boolean", description: "Drop ledger rows received after the race started. Default true." },
+        include_changes: { type: "boolean", description: "Include every individual change. Default true; set false for a compact summary." },
+      },
+      required: ["race_date"],
       additionalProperties: false,
     },
     annotations: READ_ONLY,
@@ -382,15 +402,29 @@ async function runTool(name: string, args: Record<string, unknown>, env: Env): P
     case "get_ledger":
       return getLedger(db, args);
 
+    case "get_odds_movement": {
+      const md = dateArg(args.race_date, "race_date");
+      const bt = optString(args.bet_type, "bet_type", 3);
+      if (bt && bt !== "WIN" && bt !== "PLA") throw new ToolInputError("bet_type must be WIN or PLA");
+      return (await loadOddsMovement(db, {
+        meeting_date: md,
+        race_no: optInt(args.race_no, "race_no", 1, 20),
+        horse: optString(args.horse, "horse", 64),
+        bet_type: bt,
+        exclude_post_race: args.exclude_post_race !== false,
+        include_changes: args.include_changes !== false,
+      })) as unknown as Record<string, Json>;
+    }
+
     case "get_data_quality":
       return getDataQuality(db, dateArg(args.meeting_date));
   }
   throw new ToolInputError(`unknown tool: ${name}`);
 }
 
-function dateArg(v: unknown): string {
-  const s = reqString(v, "meeting_date", 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new ToolInputError("meeting_date must be YYYY-MM-DD");
+function dateArg(v: unknown, name = "meeting_date"): string {
+  const s = reqString(v, name, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new ToolInputError(`${name} must be YYYY-MM-DD`);
   return s;
 }
 function optInt(v: unknown, name: string, min: number, max: number): number | undefined {
