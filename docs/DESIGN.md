@@ -70,6 +70,28 @@ post_start 处理：事件涉及的场次**全部**已开跑时，`post_race = 1
 
 `odds_ledger` 是全系统共用的追加型账本：一行一个（事件, 场次, 马号, WIN/PLA）赔率变化，带 seq、event_id、captured_at、received_at_hkt、post_race 和当时的质量标记。触发器禁止 UPDATE/DELETE。1.1 的 `odds_delta` 直接写入 changes（账本内马名列仍叫 `name_zh`/`name_en`，映射自 `horse_name_ch`/`horse_name_en`）；1.0 的 `odds_update` 每匹马写 WIN/PLA 两行（`prev_odds` 为 null，`odds_basis = total_return`）。`get_ledger` 按 seq（再按到达顺序）回放，缺 `prev_odds` 时用轨迹上一个值补。
 
+### 赔率变化密度（`src/oddsMovement.ts`，MCP `get_odds_movement`）
+
+用途：看是否有人在某个时段集中推高或压低某匹马的赔率。只读 `odds_ledger`，不写任何表。上游每 3–5 秒采样一次，所以同一序列每分钟最多约 12–20 次变化。
+
+- 序列：按 场次 + 马号 + WIN/PLA。按 seq、再按 id 回放；缺 `prev_odds` 时用轨迹上一个值补；赔率未变（prev = new）或无效（≤0/空）的行不算变化。默认剔除 `post_race` 行。
+- 时间：优先 `captured_at`，没有则用 `received_at_hkt`；分钟桶用 HKT（`YYYY-MM-DDTHH:MM`）。
+- 每次变化：`abs_change` = new − prev；`pct_change` = (new − prev) / prev；`implied_p_change` = 1/new − 1/prev；以及相对首个赔率的累计漂移 `cum_odds_drift`、`cum_pct_drift`、`cum_implied_p_drift`。
+- 每分钟桶：`changes`（密度）、净赔率变化、净隐含概率变化、最大单次 |%| 变化、该分钟出现的标记。
+- 序列汇总：首/末赔率、变化次数、活跃分钟数、每分钟最大变化次数、总漂移、jump/drop/burst 次数。
+
+阈值（`src/oddsMovement.ts` 常量）：
+
+| 常量 | 值 | 标记 | 含义 |
+|---|---|---|---|
+| `JUMP_PCT` | 0.15 | `sudden_jump` | 单次变化赔率上升 ≥15%（被放出） |
+| `DROP_PCT` | 0.15 | `sudden_drop` | 单次变化赔率下降 ≥15%（被买入） |
+| `PROB_SHIFT` | 0.03 | `prob_shift` | 单次变化隐含概率移动 ≥3 个百分点（热门马上百分比小但概率变化大） |
+| `BURST_CHANGES_PER_MINUTE` | 8 | `burst` | 同一序列一分钟内 ≥8 次变化（相对 3–5s 采样的高密度） |
+| `MOVEMENT_SCAN_CAP` | 20000 | — | 单次最多读取的账本行数，超出时 `scan_truncated = true` |
+
+隐含概率是 1/赔率，未扣除彩池抽水，只用于比较变化方向和幅度。
+
 ### 流状态
 
 每个赛日一行 `stream_state`：最后事件时间（UTC 与 HKT）、最后 seq、最后心跳、`last_change_seq`。判断：
