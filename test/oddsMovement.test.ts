@@ -18,7 +18,7 @@ async function tool(env: ReturnType<typeof testEnv>, name: string, args: Record<
 
 describe("odds movement (pure)", () => {
   it("documents thresholds as constants", () => {
-    expect([JUMP_PCT, DROP_PCT, PROB_SHIFT, BURST_CHANGES_PER_MINUTE]).toEqual([0.15, 0.15, 0.03, 4]);
+    expect([JUMP_PCT, DROP_PCT, PROB_SHIFT, BURST_CHANGES_PER_MINUTE]).toEqual([0.15, 0.15, 0.03, 8]);
     expect(changeFlags(4, 4.6)).toEqual(["sudden_jump", "prob_shift"]);
     expect(changeFlags(20, 23)).toEqual(["sudden_jump"]);
     expect(changeFlags(4, 3.4)).toEqual(["sudden_drop", "prob_shift"]);
@@ -29,21 +29,21 @@ describe("odds movement (pure)", () => {
     const series = computeOddsMovement(fx.rows, { excludePostRace: true });
     const a = series.find((s) => s.race_no === 3 && s.runner_no === 1 && s.bet_type === "WIN")!;
     expect(a.name_en).toBe("TEST HORSE A");
-    expect(a.change_count).toBe(5); // unchanged 8.0 -> 8.0 is not a change; post-race row dropped
+    expect(a.change_count).toBe(9); // unchanged 8.0 -> 8.0 is not a change; post-race row dropped
     expect(a.first_odds).toBe(8);
-    expect(a.last_odds).toBe(4.8);
-    expect(a.cum_odds_drift).toBeCloseTo(-3.2);
-    expect(a.cum_pct_drift).toBeCloseTo(-0.4);
-    expect(a.cum_implied_p_drift).toBeCloseTo(1 / 4.8 - 1 / 8, 4);
+    expect(a.last_odds).toBe(4.5);
+    expect(a.cum_odds_drift).toBeCloseTo(-3.5);
+    expect(a.cum_pct_drift).toBeCloseTo(-0.4375);
+    expect(a.cum_implied_p_drift).toBeCloseTo(1 / 4.5 - 1 / 8, 4);
     const c = a.changes[1];
     expect([c.prev_odds, c.new_odds, c.abs_change]).toEqual([7.8, 6.5, -1.3]);
     expect(c.pct_change).toBeCloseTo(-0.1667, 4);
     expect(c.implied_p_change).toBeCloseTo(1 / 6.5 - 1 / 7.8, 4);
     expect(c.flags).toContain("sudden_drop");
     expect(c.minute_hkt).toBe("2026-10-11T12:01");
-    expect(a.minutes.map((m) => [m.minute_hkt, m.changes])).toEqual([["2026-10-11T12:00", 1], ["2026-10-11T12:01", 4]]);
+    expect(a.minutes.map((m) => [m.minute_hkt, m.changes])).toEqual([["2026-10-11T12:00", 1], ["2026-10-11T12:01", 8]]);
     expect(a.minutes[1].flags).toEqual(expect.arrayContaining(["sudden_drop", "burst"]));
-    expect([a.drops, a.jumps, a.bursts, a.max_changes_per_minute, a.active_minutes]).toEqual([2, 0, 1, 4, 2]);
+    expect([a.drops, a.jumps, a.bursts, a.max_changes_per_minute, a.active_minutes]).toEqual([2, 0, 1, 8, 2]);
 
     const b = series.find((s) => s.runner_no === 2 && s.bet_type === "WIN")!;
     expect(b.jumps).toBe(1);
@@ -52,8 +52,8 @@ describe("odds movement (pure)", () => {
     expect(pla.change_count).toBe(1); // prev_odds carried by the push itself
 
     const withPost = computeOddsMovement(fx.rows).find((s) => s.race_no === 3 && s.runner_no === 1)!;
-    expect(withPost.change_count).toBe(6);
-    expect(withPost.changes[5].post_race).toBe(true);
+    expect(withPost.change_count).toBe(10);
+    expect(withPost.changes[9].post_race).toBe(true);
   });
 
   it("matches horse by number or name", () => {
@@ -80,7 +80,7 @@ describe("get_odds_movement MCP tool", () => {
     expect(all.series_count).toBe(4);
     expect(all.thresholds.jump_pct).toBe(JUMP_PCT);
     const a = all.series.find((s: any) => s.race_no === 3 && s.runner_no === 1);
-    expect(a.change_count).toBe(5); // post-race excluded by default
+    expect(a.change_count).toBe(9); // post-race excluded by default
 
     const r3 = (await tool(env, "get_odds_movement", { race_date: fx.meeting_date, race_no: 3, horse: "TEST HORSE B" })).structuredContent;
     expect(r3.series.map((s: any) => [s.runner_no, s.bet_type])).toEqual([[2, "PLA"], [2, "WIN"]]);

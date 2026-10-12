@@ -144,7 +144,7 @@ const TOOLS = [
   {
     name: "get_odds_movement",
     title: "Odds movement / change density",
-    description: "Odds change density computed from the append-only odds ledger, per race + horse + WIN/PLA and per HKT minute bucket: change count, each change's absolute and % move, implied probability (1/odds) change, cumulative drift from the first seen odds, and flags sudden_jump (odds up >= 15% in one change), sudden_drop (odds down >= 15%), prob_shift (implied probability moves >= 3 points) and burst (>= 4 changes in one minute; upstream samples about every 10 s). Use it to spot horses being pushed in or out.",
+    description: "Odds change density computed from the append-only odds ledger, per race + horse + WIN/PLA and per HKT minute bucket: change count, each change's absolute and % move, implied probability (1/odds) change, cumulative drift from the first seen odds, and flags sudden_jump (odds up >= 15% in one change), sudden_drop (odds down >= 15%), prob_shift (implied probability moves >= 3 points) and burst (>= 8 changes in one minute; upstream samples every 3-5 s, max ~12-20/min). Use it to spot horses being pushed in or out.",
     inputSchema: {
       type: "object",
       properties: {

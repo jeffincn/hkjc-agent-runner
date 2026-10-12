@@ -72,7 +72,7 @@ post_start 处理：事件涉及的场次**全部**已开跑时，`post_race = 1
 
 ### 赔率变化密度（`src/oddsMovement.ts`，MCP `get_odds_movement`）
 
-用途：看是否有人在某个时段集中推高或压低某匹马的赔率。只读 `odds_ledger`，不写任何表。上游约每 10 秒采样一次，所以同一序列每分钟最多约 6 次变化。
+用途：看是否有人在某个时段集中推高或压低某匹马的赔率。只读 `odds_ledger`，不写任何表。上游每 3–5 秒采样一次，所以同一序列每分钟最多约 12–20 次变化。
 
 - 序列：按 场次 + 马号 + WIN/PLA。按 seq、再按 id 回放；缺 `prev_odds` 时用轨迹上一个值补；赔率未变（prev = new）或无效（≤0/空）的行不算变化。默认剔除 `post_race` 行。
 - 时间：优先 `captured_at`，没有则用 `received_at_hkt`；分钟桶用 HKT（`YYYY-MM-DDTHH:MM`）。
@@ -87,7 +87,7 @@ post_start 处理：事件涉及的场次**全部**已开跑时，`post_race = 1
 | `JUMP_PCT` | 0.15 | `sudden_jump` | 单次变化赔率上升 ≥15%（被放出） |
 | `DROP_PCT` | 0.15 | `sudden_drop` | 单次变化赔率下降 ≥15%（被买入） |
 | `PROB_SHIFT` | 0.03 | `prob_shift` | 单次变化隐含概率移动 ≥3 个百分点（热门马上百分比小但概率变化大） |
-| `BURST_CHANGES_PER_MINUTE` | 4 | `burst` | 同一序列一分钟内 ≥4 次变化 |
+| `BURST_CHANGES_PER_MINUTE` | 8 | `burst` | 同一序列一分钟内 ≥8 次变化（相对 3–5s 采样的高密度） |
 | `MOVEMENT_SCAN_CAP` | 20000 | — | 单次最多读取的账本行数，超出时 `scan_truncated = true` |
 
 隐含概率是 1/赔率，未扣除彩池抽水，只用于比较变化方向和幅度。

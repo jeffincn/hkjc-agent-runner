@@ -3,8 +3,8 @@
 // loadOddsMovement() reads the ledger (read-only) and feeds it in.
 import { parseTs, toHkt } from "./env";
 
-/** Upstream samples odds roughly every 10 s, so at most ~6 changes per minute per series. */
-export const SAMPLE_INTERVAL_SECONDS = 10;
+/** Upstream samples odds every 3–5 s, so at most ~12–20 changes per minute per series. */
+export const SAMPLE_INTERVAL_SECONDS = 3;
 /** A single change whose odds rise by at least this fraction (e.g. 4.0 -> 4.6) is a sudden jump (drifting out). */
 export const JUMP_PCT = 0.15;
 /** A single change whose odds fall by at least this fraction (e.g. 4.0 -> 3.4) is a sudden drop (being backed). */
@@ -12,7 +12,7 @@ export const DROP_PCT = 0.15;
 /** A single change that moves implied probability (1/odds) by at least this many points (0..1 scale) is also flagged. */
 export const PROB_SHIFT = 0.03;
 /** A minute bucket with at least this many changes for one series is flagged as a burst (high density). */
-export const BURST_CHANGES_PER_MINUTE = 4;
+export const BURST_CHANGES_PER_MINUTE = 8;
 /** Rows read from the ledger per call. */
 export const MOVEMENT_SCAN_CAP = 20000;
 
