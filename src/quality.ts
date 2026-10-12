@@ -20,6 +20,13 @@ export const LATE_THRESHOLD_MS = 60_000;
 /** Events whose content feeds pre-race analysis. post_start ones are diverted to post-race/record only. */
 export const PRE_RACE_INPUT_EVENTS = new Set(["odds_update", "odds_delta", "scratch", "horse_update", "injury_update"]);
 
+/**
+ * HKJC never supplies source.last_updated_at for these events (schedule, form/past-performance,
+ * horse master updates, no_update heartbeats). Still store null; do not raise missing_source_time.
+ * Keep flagging for odds_delta/odds_update, lock, result, dividends, scratch (and other types).
+ */
+export const SOURCE_TIME_NOT_EXPECTED = new Set(["schedule", "runs_update", "horse_update", "no_update"]);
+
 export interface StreamSnapshot {
   last_seq: number | null;
 }
@@ -98,8 +105,14 @@ export function assess(
   const flags = new Set<QualityFlag>();
   const v = ev.v11;
 
-  // missing_source_time: 1.0 never carries a source time; 1.1 may send null.
-  if (!v || !t.source_updated_at || v.quality.missing_source_time === true) flags.add("missing_source_time");
+  // missing_source_time: flag only when a source time is expected for this event type.
+  // Source null is still recorded on the inbox row via timing / v11 fields.
+  if (
+    !SOURCE_TIME_NOT_EXPECTED.has(ev.event) &&
+    (!v || !t.source_updated_at || v.quality.missing_source_time === true)
+  ) {
+    flags.add("missing_source_time");
+  }
 
   for (const ts of [t.sent_at, t.captured_at, t.source_updated_at]) {
     const ms = parseTs(ts);
