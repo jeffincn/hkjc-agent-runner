@@ -3,6 +3,8 @@
  * A field that fails is quarantined with a reason and gets no Fair / EV.
  */
 
+import { isTotalReturnBasis, ODDS_BASIS_HKJC } from "./push11";
+
 export type BetType = "WIN" | "PLA";
 
 export interface ProbInput {
@@ -12,7 +14,10 @@ export interface ProbInput {
   bet_type: BetType;
   p: unknown;
   odds: number | null;
-  /** "total_return" (HKJC style: odds include the stake) or "net" (profit per unit staked). */
+  /**
+   * Odds basis: `"total_return"`, the hkjc-push/1.1 const
+   * (`HKD total return per $1 unit incl. stake`), or `"net"` (profit per unit staked).
+   */
   odds_basis: string | null;
 }
 
@@ -39,7 +44,7 @@ export interface Validated {
 
 export const WIN_SUM_TOLERANCE = 0.05;
 export const PLA_SUM_TOLERANCE = 0.15;
-export const ODDS_BASES = ["total_return", "net"] as const;
+export const ODDS_BASES = ["total_return", ODDS_BASIS_HKJC, "net"] as const;
 
 /** HKJC place terms: 3 places with 7+ starters, 2 with 4–6, no place pool below 4. */
 export function placesPaid(starters: number): number {
@@ -50,7 +55,7 @@ export function placesPaid(starters: number): number {
 
 /** Converts quoted odds to total return per 1 unit staked. null when the basis is unknown. */
 export function totalReturn(odds: number, basis: string | null): number | null {
-  if (basis === "total_return") return odds;
+  if (isTotalReturnBasis(basis)) return odds;
   if (basis === "net") return odds + 1;
   return null;
 }

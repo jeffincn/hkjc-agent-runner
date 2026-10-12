@@ -3,22 +3,42 @@ import { handleWebhook } from "../src/webhook";
 import { handleMcp } from "../src/mcp";
 import { handleMessage } from "../src/consumer";
 import { setClockForTest, toHkt } from "../src/env";
-import { extract11, mapChange } from "../src/push11";
+import { extract11, mapChange, ODDS_BASIS_HKJC } from "../src/push11";
 import { inFastWindow, streamStatus } from "../src/quality";
 import { placesPaid, validateProbabilities, type ProbInput, type RaceField } from "../src/validation";
 import { setRolesForTest } from "../src/roles";
 import type { ModelClient } from "../src/openai";
 import { ctxOf, envelope, fakeQueue, freshDb, race, signed, testEnv, useFixtureRoles } from "./helpers";
 
-// Desensitized fixtures only: fake UUIDs, placeholder names, example.invalid URLs.
+// Desensitized fixtures shaped like hkjc-worker docs/push-schema-1.1.md (fake UUIDs / names / example.invalid).
 const MD = "2026-10-07";
 const T0 = Date.parse("2026-10-07T12:00:00+08:00");
+const SRC_AT = "2026-10-07T11:59:50+08:00";
+const POST = "2026-10-07T18:35:00+08:00";
 let now = T0;
 
 beforeEach(() => { now = T0; setClockForTest(() => now); useFixtureRoles(); });
 afterEach(() => { setClockForTest(null); setRolesForTest(null); });
 
 const eid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+/** Schema-shaped odds_delta change row (desensitized names). */
+function change(opts: Record<string, unknown> = {}) {
+  return {
+    race_no: 1,
+    runner_no: 1,
+    horse_name_ch: "測試馬甲",
+    horse_name_en: "TEST HORSE A",
+    bet_type: "WIN",
+    odds_basis: ODDS_BASIS_HKJC,
+    prev_odds: 4.0,
+    new_odds: 3.6,
+    source_last_updated_at: SRC_AT,
+    race_post_time: POST,
+    pool_status: "SELLING",
+    ...opts,
+  };
+}
 
 function v11(opts: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -30,14 +50,17 @@ function v11(opts: Record<string, unknown> = {}): string {
     venue: "HV",
     captured_at: "2026-10-07T11:59:58+08:00",
     sent_at: "2026-10-07T11:59:59+08:00",
-    source: { last_updated_at: "2026-10-07T11:59:50+08:00", url: "https://example.invalid/odds" },
+    source: { name: "HKJC GraphQL", url: "https://example.invalid/odds", last_updated_at: SRC_AT },
     quality: { missing_source_time: false, post_start: false, late_ms: 0 },
     races: [],
     changes: [
-      { race_no: 1, runner_no: 1, name_zh: "測試馬甲", name_en: "TEST HORSE A", bet_type: "WIN", prev_odds: 4.0, new_odds: 3.6, odds_basis: "total_return" },
-      { race_no: 1, runner_no: 1, name_zh: "測試馬甲", name_en: "TEST HORSE A", bet_type: "PLA", prev_odds: 1.8, new_odds: 1.7, odds_basis: "total_return" },
+      change(),
+      change({ bet_type: "PLA", prev_odds: 1.8, new_odds: 1.7 }),
     ],
-    pools: null,
+    pools: [
+      { race_no: 1, bet_type: "WIN", investment: null },
+      { race_no: 1, bet_type: "PLA", investment: null },
+    ],
     ...opts,
   });
 }
@@ -59,16 +82,34 @@ async function tool(env: ReturnType<typeof testEnv>, name: string, args: Record<
 }
 
 describe("hkjc-push/1.1 field mapping", () => {
-  it("maps envelope and change fields, tolerating null source time and null pools", () => {
-    const f = extract11(JSON.parse(v11({ source: { last_updated_at: null, url: "https://example.invalid/x" } })));
+  it("maps schema field names (event, horse_name_ch/en, odds_basis const, pools, last_change_*)", () => {
+    const f = extract11(JSON.parse(v11({
+      source: { name: "HKJC GraphQL", url: "https://example.invalid/x", last_updated_at: null },
+      quality: { missing_source_time: true, post_start: false, late_ms: 0 },
+    })));
     expect(f.event_id).toBe(eid(1));
     expect(f.seq).toBe(1);
+    expect(f.source_name).toBe("HKJC GraphQL");
     expect(f.source_last_updated_at).toBeNull();
-    expect(f.pools).toBeNull();
+    expect(f.pools).toEqual([
+      { race_no: 1, bet_type: "WIN", investment: null },
+      { race_no: 1, bet_type: "PLA", investment: null },
+    ]);
     expect(f.changes).toHaveLength(2);
-    expect(f.changes[0]).toMatchObject({ race_no: 1, runner_no: 1, bet_type: "WIN", prev_odds: 4, new_odds: 3.6, odds_basis: "total_return", name_zh: "測試馬甲" });
-    expect(mapChange({ race_no: 2, horse_no: 3, bet_type: "PLACE", new_odds: "2.5" })).toMatchObject({ runner_no: 3, bet_type: "PLA", new_odds: 2.5 });
+    expect(f.changes[0]).toMatchObject({
+      race_no: 1, runner_no: 1, bet_type: "WIN", prev_odds: 4, new_odds: 3.6,
+      odds_basis: ODDS_BASIS_HKJC, name_zh: "測試馬甲", name_en: "TEST HORSE A",
+      source_last_updated_at: SRC_AT, race_post_time: POST, pool_status: "SELLING",
+    });
+    // runner_no alias + PLACE→PLA still accepted for transitional payloads
+    expect(mapChange({ race_no: 2, horse_no: 3, bet_type: "PLACE", new_odds: "2.5", odds_basis: ODDS_BASIS_HKJC })).toMatchObject({ runner_no: 3, bet_type: "PLA", new_odds: 2.5 });
     expect(mapChange({ race_no: 2, runner_no: 3, bet_type: "QIN" })).toBeNull();
+    const hb = extract11(JSON.parse(v11({
+      event: "no_update", changes: undefined, pools: undefined,
+      last_change_seq: 7, last_change_at: "2026-10-07T11:58:00+08:00",
+    })));
+    expect(hb.last_change_seq).toBe(7);
+    expect(hb.last_change_at).toBe("2026-10-07T11:58:00+08:00");
   });
 });
 
@@ -126,7 +167,7 @@ describe("quality flags", () => {
     now += 1000; await post(env, v11({ event_id: eid(9), seq: 2 }));                      // same seq, new id
     now += 1000; await post(env, v11({ event_id: eid(5), seq: 5, captured_at: "2026-10-07T12:10:00+08:00" })); // future
     now += 1000; await post(env, v11({ event_id: eid(6), seq: 6, quality: { missing_source_time: true, post_start: false, late_ms: 4000 },
-      source: { last_updated_at: null, url: "https://example.invalid/odds" } }));
+      source: { name: "HKJC GraphQL", last_updated_at: null, url: "https://example.invalid/odds" } }));
     const f = await flags();
     expect(f[0]).toEqual([1, []]);
     expect(f[1]).toEqual([4, ["gap"]]);
@@ -158,11 +199,16 @@ describe("quality flags", () => {
 
     // 1.1 delta touching race 1 (started) and race 2 (open): event stays, race-1 ledger rows are post_race.
     await post(env, v11({ captured_at: "2026-10-07T18:39:59+08:00", sent_at: "2026-10-07T18:39:59+08:00",
-      source: { last_updated_at: "2026-10-07T18:39:58+08:00", url: "https://example.invalid/odds" },
+      source: { name: "HKJC GraphQL", last_updated_at: "2026-10-07T18:39:58+08:00", url: "https://example.invalid/odds" },
       changes: [
-        { race_no: 1, runner_no: 1, name_zh: "測試馬甲", name_en: "TEST HORSE A", bet_type: "WIN", prev_odds: 4, new_odds: 3.9, odds_basis: "total_return" },
-        { race_no: 2, runner_no: 5, name_zh: "測試馬乙", name_en: "TEST HORSE B", bet_type: "WIN", prev_odds: 8, new_odds: 7.5, odds_basis: "total_return" },
-      ] }));
+        change({ race_no: 1, runner_no: 1, horse_name_ch: "測試馬甲", horse_name_en: "TEST HORSE A", bet_type: "WIN", prev_odds: 4, new_odds: 3.9, source_last_updated_at: "2026-10-07T18:39:58+08:00" }),
+        change({ race_no: 2, runner_no: 5, horse_name_ch: "測試馬乙", horse_name_en: "TEST HORSE B", bet_type: "WIN", prev_odds: 8, new_odds: 7.5, race_post_time: "2026-10-07T19:05:00+08:00", source_last_updated_at: "2026-10-07T18:39:58+08:00" }),
+      ],
+      pools: [
+        { race_no: 1, bet_type: "WIN", investment: null }, { race_no: 1, bet_type: "PLA", investment: null },
+        { race_no: 2, bet_type: "WIN", investment: null }, { race_no: 2, bet_type: "PLA", investment: null },
+      ],
+    }));
     const led = (await tool(env, "get_ledger", { meeting_date: MD, exclude_post_race: true })).structuredContent;
     expect(led.entries.map((e: any) => [e.race_no, e.post_race])).toEqual([[2, false]]);
     const all = (await tool(env, "get_ledger", { meeting_date: MD, race_no: 1 })).structuredContent;
@@ -190,7 +236,8 @@ describe("stream liveness", () => {
     const env = testEnv(db, fakeQueue());
     await post(env, v11());
     now += 9 * 60_000;
-    await post(env, v11({ event: "no_update", event_id: eid(2), seq: 2, changes: undefined, last_change_seq: 1 }));
+    await post(env, v11({ event: "no_update", event_id: eid(2), seq: 2, changes: undefined, pools: undefined,
+      last_change_seq: 1, last_change_at: "2026-10-07T11:59:58+08:00" }));
     now += 60_000;
     let q = (await tool(env, "get_data_quality", { meeting_date: MD })).structuredContent;
     expect(q.stream_status).toBe("ok");
@@ -228,6 +275,10 @@ describe("probability and EV validation", () => {
     expect(a.fair_odds).toBe(4);
     expect(a.ev).toBeCloseTo(0.25);
     expect(b.ev).toBeCloseTo(0.25);
+    // Schema const must be treated as total_return — never quarantined for unknown basis.
+    const [hkjc] = validateProbabilities([row({ p: 0.25, odds: 5, odds_basis: ODDS_BASIS_HKJC })], field([1, 2, 3, 4]));
+    expect(hkjc.status).toBe("accepted");
+    expect(hkjc.ev).toBeCloseTo(0.25);
     const [c] = validateProbabilities([row({ odds_basis: "decimal?" })], field([1]));
     expect(c.status).toBe("quarantined");
     expect(c.ev).toBeNull();
@@ -282,11 +333,15 @@ describe("ledger", () => {
     for (let s = 1; s <= 3; s++) {
       now += 60_000;
       await post(env, v11({ event_id: eid(s), seq: s, changes: [
-        { race_no: 1, runner_no: 1, name_zh: "測試馬甲", name_en: "TEST HORSE A", bet_type: "WIN", prev_odds: null, new_odds: 5 - s * 0.5, odds_basis: "total_return" },
+        change({ prev_odds: null, new_odds: 5 - s * 0.5 }),
       ] }));
     }
     const led = (await tool(env, "get_ledger", { meeting_date: MD, runner_no: 1, bet_type: "WIN" })).structuredContent;
-    expect(led.entries.map((e: any) => [e.seq, e.prev_odds, e.new_odds])).toEqual([[1, null, 4.5], [2, 4.5, 4], [3, 4, 3.5]]);
+    expect(led.entries.map((e: any) => [e.seq, e.prev_odds, e.new_odds, e.odds_basis, e.name_zh])).toEqual([
+      [1, null, 4.5, ODDS_BASIS_HKJC, "測試馬甲"],
+      [2, 4.5, 4, ODDS_BASIS_HKJC, "測試馬甲"],
+      [3, 4, 3.5, ODDS_BASIS_HKJC, "測試馬甲"],
+    ]);
     const since = (await tool(env, "get_ledger", { meeting_date: MD, since_seq: 2, limit: 10 })).structuredContent;
     expect(since.entries.map((e: any) => [e.seq, e.prev_odds])).toEqual([[3, 4]]);
     await expect(db.prepare(`UPDATE odds_ledger SET new_odds = 99`).run()).rejects.toThrow(/append-only/);

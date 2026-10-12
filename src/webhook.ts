@@ -89,9 +89,19 @@ export async function handleWebhook(request: Request, env: Env, ctx: ExecutionCo
         if (typeof runner?.horse_no !== "number") continue;
         for (const [bet_type, odds] of [["WIN", runner.win_odds], ["PLA", runner.place_odds]] as const) {
           if (typeof odds !== "number") continue;
-          // 1.0 snapshots carry no previous value or basis; HKJC quotes are total return per $1.
-          ledger.push({ race_no: r.race_no, runner_no: runner.horse_no, name_zh: null, name_en: runner.horse_name ?? null,
-            bet_type, prev_odds: null, new_odds: odds, odds_basis: "total_return", post_race: isPost(r.race_no) });
+          // Snapshots carry no previous value; HKJC quotes are total return per $1.
+          // 1.1 may add horse_name_ch alongside horse_name.
+          ledger.push({
+            race_no: r.race_no,
+            runner_no: runner.horse_no,
+            name_zh: runner.horse_name_ch ?? null,
+            name_en: runner.horse_name ?? null,
+            bet_type,
+            prev_odds: null,
+            new_odds: odds,
+            odds_basis: "total_return",
+            post_race: isPost(r.race_no),
+          });
         }
       }
     }

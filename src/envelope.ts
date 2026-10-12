@@ -25,6 +25,8 @@ export type PushEvent = (typeof KNOWN_EVENTS)[number];
 export interface PushRunner {
   horse_no: number;
   horse_name: string | null;
+  /** Additive 1.1 field; omitted by older / 1.0 producers. */
+  horse_name_ch?: string | null;
   win_odds: number | null;
   place_odds: number | null;
   status: string | null;
@@ -36,6 +38,8 @@ export interface PushRace {
   post_time: string | null;
   snapshot_time: string;
   pool_status: string | null;
+  /** Per-race pool last update (additive on 1.1 snapshots). */
+  source_last_updated_at?: string | null;
   runners: PushRunner[];
 }
 

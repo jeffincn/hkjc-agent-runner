@@ -1,19 +1,22 @@
 /**
  * hkjc-push/1.1 field mapping. THIS IS THE ONLY PLACE that knows 1.1 field names.
  *
- * The authoritative schema will live in jeffincn/hkjc-worker docs/push-schema-1.1.md
- * (not published yet when this was written). Each logical field lists the JSON paths
- * we accept, first match wins. When upstream finalises names, edit FIELD_MAP / CHANGE_FIELDS
- * only; nothing else in the runner reads 1.1 keys directly.
+ * Authoritative schema: https://github.com/jeffincn/hkjc-worker/blob/main/docs/push-schema-1.1.md
+ * When upstream renames fields, edit FIELD_MAP / CHANGE_FIELDS only; nothing else in the
+ * runner reads 1.1 keys directly. Event type key is `event` (never `type`).
  */
 
 type Path = readonly string[];
+
+/** Matches hkjc-worker ODDS_BASIS / schema const for odds_delta.changes[].odds_basis. */
+export const ODDS_BASIS_HKJC = "HKD total return per $1 unit incl. stake" as const;
 
 export const FIELD_MAP = {
   event_id: [["event_id"]],
   seq: [["seq"]],
   captured_at: [["captured_at"]],
   sent_at: [["sent_at"]],
+  source_name: [["source", "name"]],
   source_last_updated_at: [["source", "last_updated_at"]],
   source_url: [["source", "url"]],
   quality_missing_source_time: [["quality", "missing_source_time"]],
@@ -22,18 +25,32 @@ export const FIELD_MAP = {
   changes: [["changes"]],
   pools: [["pools"]],
   last_change_seq: [["last_change_seq"]],
+  last_change_at: [["last_change_at"]],
 } as const satisfies Record<string, readonly Path[]>;
 
-/** Keys inside each odds_delta changes[] entry. Alternatives are tried in order. */
+/**
+ * Keys inside each odds_delta changes[] entry.
+ * Schema names first; older aliases kept as fallbacks for desensitized / transitional fixtures.
+ */
 export const CHANGE_FIELDS = {
   race_no: ["race_no"],
   runner_no: ["runner_no", "horse_no"],
-  name_zh: ["name_zh", "name_ch", "horse_name_ch", "horse_name_zh"],
-  name_en: ["name_en", "horse_name_en", "horse_name"],
+  name_zh: ["horse_name_ch", "name_zh", "name_ch", "horse_name_zh"],
+  name_en: ["horse_name_en", "name_en", "horse_name"],
   bet_type: ["bet_type"],
   prev_odds: ["prev_odds"],
   new_odds: ["new_odds"],
   odds_basis: ["odds_basis"],
+  source_last_updated_at: ["source_last_updated_at"],
+  race_post_time: ["race_post_time"],
+  pool_status: ["pool_status"],
+} as const;
+
+/** Keys inside each odds_delta pools[] entry (pool total turnover only). */
+export const POOL_FIELDS = {
+  race_no: ["race_no"],
+  bet_type: ["bet_type"],
+  investment: ["investment"],
 } as const;
 
 /** Event names introduced in 1.1. */
@@ -47,7 +64,17 @@ export interface OddsChange {
   bet_type: "WIN" | "PLA";
   prev_odds: number | null;
   new_odds: number | null;
+  /** Upstream string; HKJC const is treated as total_return by validation. */
   odds_basis: string | null;
+  source_last_updated_at: string | null;
+  race_post_time: string | null;
+  pool_status: string | null;
+}
+
+export interface PoolInvestment {
+  race_no: number;
+  bet_type: "WIN" | "PLA";
+  investment: number | null;
 }
 
 export interface Push11Fields {
@@ -55,14 +82,16 @@ export interface Push11Fields {
   seq: number | null;
   captured_at: string | null;
   sent_at: string | null;
+  source_name: string | null;
   source_last_updated_at: string | null;
   source_url: string | null;
   quality: { missing_source_time: boolean | null; post_start: boolean | null; late_ms: number | null };
   changes: OddsChange[];
   /** Entries we could not map (kept so nothing is silently dropped). */
   rejected_changes: number;
-  pools: unknown[] | null;
+  pools: PoolInvestment[] | null;
   last_change_seq: number | null;
+  last_change_at: string | null;
 }
 
 function at(obj: unknown, path: Path): unknown {
@@ -87,11 +116,22 @@ function pickKey(obj: Record<string, unknown>, keys: readonly string[]): unknown
 const str = (v: unknown) => (typeof v === "string" && v ? v : null);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null);
 const bool = (v: unknown) => (typeof v === "boolean" ? v : null);
+/** Like num, but preserves explicit null (schema allows null prev_odds / investment). */
+const numOrNull = (v: unknown): number | null | undefined => {
+  if (v === null) return null;
+  if (v === undefined) return undefined;
+  return num(v);
+};
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isSchema11(schema: string): boolean {
   return /^hkjc-push\/1\.(1|[2-9]|\d{2,})$/.test(schema);
+}
+
+/** True when the basis means HKJC-style total return per $1 (incl. stake). */
+export function isTotalReturnBasis(basis: string | null | undefined): boolean {
+  return basis === "total_return" || basis === ODDS_BASIS_HKJC;
 }
 
 export function mapChange(raw: unknown): OddsChange | null {
@@ -102,16 +142,32 @@ export function mapChange(raw: unknown): OddsChange | null {
   const bt = String(pickKey(o, CHANGE_FIELDS.bet_type) ?? "").toUpperCase();
   const bet_type = bt === "WIN" ? "WIN" : bt === "PLA" || bt === "PLACE" ? "PLA" : null;
   if (race_no === null || runner_no === null || !bet_type) return null;
+  const prev = numOrNull(pickKey(o, CHANGE_FIELDS.prev_odds));
+  const next = numOrNull(pickKey(o, CHANGE_FIELDS.new_odds));
   return {
     race_no,
     runner_no,
     name_zh: str(pickKey(o, CHANGE_FIELDS.name_zh)),
     name_en: str(pickKey(o, CHANGE_FIELDS.name_en)),
     bet_type,
-    prev_odds: num(pickKey(o, CHANGE_FIELDS.prev_odds)),
-    new_odds: num(pickKey(o, CHANGE_FIELDS.new_odds)),
+    prev_odds: prev === undefined ? null : prev,
+    new_odds: next === undefined ? null : next,
     odds_basis: str(pickKey(o, CHANGE_FIELDS.odds_basis)),
+    source_last_updated_at: str(pickKey(o, CHANGE_FIELDS.source_last_updated_at)),
+    race_post_time: str(pickKey(o, CHANGE_FIELDS.race_post_time)),
+    pool_status: str(pickKey(o, CHANGE_FIELDS.pool_status)),
   };
+}
+
+export function mapPool(raw: unknown): PoolInvestment | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const race_no = num(pickKey(o, POOL_FIELDS.race_no));
+  const bt = String(pickKey(o, POOL_FIELDS.bet_type) ?? "").toUpperCase();
+  const bet_type = bt === "WIN" ? "WIN" : bt === "PLA" ? "PLA" : null;
+  if (race_no === null || !bet_type) return null;
+  const inv = numOrNull(pickKey(o, POOL_FIELDS.investment));
+  return { race_no, bet_type, investment: inv === undefined ? null : inv };
 }
 
 export function extract11(raw: Record<string, unknown>): Push11Fields {
@@ -119,14 +175,18 @@ export function extract11(raw: Record<string, unknown>): Push11Fields {
   const rawChanges = pick(raw, FIELD_MAP.changes);
   const list = Array.isArray(rawChanges) ? rawChanges : [];
   const changes = list.map(mapChange).filter((c): c is OddsChange => c !== null);
-  const pools = pick(raw, FIELD_MAP.pools);
+  const rawPools = pick(raw, FIELD_MAP.pools);
+  const poolList = Array.isArray(rawPools) ? rawPools.map(mapPool).filter((p): p is PoolInvestment => p !== null) : null;
   const seq = num(pick(raw, FIELD_MAP.seq));
+  // source.last_updated_at is explicitly nullable in the schema — preserve null.
+  const sourceUpdated = pick(raw, FIELD_MAP.source_last_updated_at);
   return {
     event_id: eid && UUID_RE.test(eid) ? eid.toLowerCase() : eid,
     seq: seq !== null && Number.isInteger(seq) ? seq : null,
     captured_at: str(pick(raw, FIELD_MAP.captured_at)),
     sent_at: str(pick(raw, FIELD_MAP.sent_at)),
-    source_last_updated_at: str(pick(raw, FIELD_MAP.source_last_updated_at)),
+    source_name: str(pick(raw, FIELD_MAP.source_name)),
+    source_last_updated_at: sourceUpdated === null ? null : str(sourceUpdated),
     source_url: str(pick(raw, FIELD_MAP.source_url)),
     quality: {
       missing_source_time: bool(pick(raw, FIELD_MAP.quality_missing_source_time)),
@@ -135,7 +195,8 @@ export function extract11(raw: Record<string, unknown>): Push11Fields {
     },
     changes,
     rejected_changes: list.length - changes.length,
-    pools: Array.isArray(pools) ? pools : null,
+    pools: poolList,
     last_change_seq: num(pick(raw, FIELD_MAP.last_change_seq)),
+    last_change_at: str(pick(raw, FIELD_MAP.last_change_at)),
   };
 }

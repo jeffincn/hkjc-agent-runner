@@ -34,12 +34,13 @@
 
 ## hkjc-push/1.1 与数据质量（2026-10-12）
 
-上游会在 1.0 之外新增 `hkjc-push/1.1`。正式 schema 将放在 hkjc-worker 的 `docs/push-schema-1.1.md`（写这段时还没有发布），所以 1.1 的字段名**只**在 `src/push11.ts` 的 `FIELD_MAP` / `CHANGE_FIELDS` 里出现，上游定稿后只改那一处。
+上游 `hkjc-push/1.1` 正式 schema 见 [hkjc-worker docs/push-schema-1.1.md](https://github.com/jeffincn/hkjc-worker/blob/main/docs/push-schema-1.1.md)。1.1 字段名**只**在 `src/push11.ts` 的 `FIELD_MAP` / `CHANGE_FIELDS` 里出现；事件类型键是 `event`（不是 `type`）。
 
 ### 接收
 
-- `schema` 为 `hkjc-push/1.0` 与 `hkjc-push/1.1` 都接受。1.1 额外读取 `event_id`、`seq`、`captured_at`、`sent_at`、`source.last_updated_at`（可为 null）、`source.url`、`quality{missing_source_time, post_start, late_ms}`。
-- 新事件：`odds_delta`（`changes[]` + 可为 null 的 `pools[]`）写入账本；`no_update` 心跳更新 `stream_state.last_heartbeat_at` 和 `last_change_seq`。两者都只记账，不跑分析。
+- `schema` 为 `hkjc-push/1.0` 与 `hkjc-push/1.1` 都接受。1.1 额外读取 `event_id`、`seq`、`captured_at`、`sent_at`、`source{name,url,last_updated_at}`（`last_updated_at` 可为 null）、`quality{missing_source_time, post_start, late_ms}`。
+- 新事件：`odds_delta`（`changes[]` + `pools[]`，池总额可为 null）写入账本；`no_update` 心跳带 `last_change_seq` / `last_change_at`，更新 `stream_state`。两者都只记账，不跑分析。
+- `odds_delta.changes[]` 马名键为 `horse_name_ch` / `horse_name_en`；`odds_basis` 固定为 `HKD total return per $1 unit incl. stake`（按 total_return 算 EV，不隔离）。
 - 去重：1.1 用 `event_id`（重试时不变）作 dedupe key，重复投递只加 `duplicate_count` 并在原行加 `duplicate` 标记。1.0 保持原规则。
 - 每条事件记录 `received_at`（UTC）和 `received_at_hkt`（+08:00）。
 
@@ -67,7 +68,7 @@ post_start 处理：事件涉及的场次**全部**已开跑时，`post_race = 1
 
 ### 账本
 
-`odds_ledger` 是全系统共用的追加型账本：一行一个（事件, 场次, 马号, WIN/PLA）赔率变化，带 seq、event_id、captured_at、received_at_hkt、post_race 和当时的质量标记。触发器禁止 UPDATE/DELETE。1.1 的 `odds_delta` 直接写入 changes；1.0 的 `odds_update` 每匹马写 WIN/PLA 两行（`prev_odds` 为 null，`odds_basis = total_return`）。`get_ledger` 按 seq（再按到达顺序）回放，缺 `prev_odds` 时用轨迹上一个值补。
+`odds_ledger` 是全系统共用的追加型账本：一行一个（事件, 场次, 马号, WIN/PLA）赔率变化，带 seq、event_id、captured_at、received_at_hkt、post_race 和当时的质量标记。触发器禁止 UPDATE/DELETE。1.1 的 `odds_delta` 直接写入 changes（账本内马名列仍叫 `name_zh`/`name_en`，映射自 `horse_name_ch`/`horse_name_en`）；1.0 的 `odds_update` 每匹马写 WIN/PLA 两行（`prev_odds` 为 null，`odds_basis = total_return`）。`get_ledger` 按 seq（再按到达顺序）回放，缺 `prev_odds` 时用轨迹上一个值补。
 
 ### 流状态
 
@@ -86,6 +87,6 @@ post_start 处理：事件涉及的场次**全部**已开跑时，`post_race = 1
 1. P 必须是有限数且在 [0,1]（例如 P(place)=116.91% 会被隔离）。
 2. 马号必须对应该场在信封里非退出（status 不含 scratch/withdrawn/退出）的马。picks 只带马号，所以信封只有一场时才能对应场次；多场且 pick 没写 `race_no` 时隔离。
 3. 角色给了整场所有在跑马的概率时做总和检查：WIN 和 ≈ 1（±0.05）；PLA 和 ≈ 派彩名次数（7 匹以上 3 个，4–6 匹 2 个，少于 4 匹没有位置彩池）±15%。只给了部分马时不做总和检查。
-4. Fair = 1/P；EV = P × 总回报赔率 − 1。`odds_basis = total_return` 直接用赔率，`net` 用赔率 + 1，其他基准隔离且不算 EV。
+4. Fair = 1/P；EV = P × 总回报赔率 − 1。`odds_basis` 为 `total_return` 或 1.1 定长字符串 `HKD total return per $1 unit incl. stake` 时直接用赔率；`net` 用赔率 + 1；其他基准隔离且不算 EV。
 
 隔离项保留原因，`fair_odds` 和 `ev` 为 null。
