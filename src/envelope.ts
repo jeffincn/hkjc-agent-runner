@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Hex } from "./crypto";
+import { extract11, isSchema11, type Push11Fields } from "./push11";
 
 /** Event names from hkjc-data-worker src/push/envelope.ts (hkjc-push/1.0). */
 export const KNOWN_EVENTS = [
@@ -15,6 +16,9 @@ export const KNOWN_EVENTS = [
   "runs_update",
   "dividends",
   "changes",
+  // hkjc-push/1.1
+  "odds_delta",
+  "no_update",
 ] as const;
 export type PushEvent = (typeof KNOWN_EVENTS)[number];
 
@@ -43,6 +47,8 @@ export interface PushEnvelope {
   venue: string | null;
   races: PushRace[];
   meta?: Record<string, unknown>;
+  /** Present only for hkjc-push/1.1+ envelopes; see src/push11.ts for the field mapping. */
+  v11?: Push11Fields;
 }
 
 export type ParseResult = { ok: true; envelope: PushEnvelope } | { ok: false; error: string };
@@ -73,6 +79,7 @@ export function parseEnvelope(text: string): ParseResult {
       venue: typeof e.venue === "string" ? e.venue : null,
       races,
       meta: e.meta && typeof e.meta === "object" ? (e.meta as Record<string, unknown>) : undefined,
+      ...(isSchema11(e.schema) ? { v11: extract11(e) } : {}),
     },
   };
 }
@@ -92,7 +99,9 @@ export function maxSnapshotTime(env: PushEnvelope): string | null {
  * 3. Events without races/snapshots (injury_update, schedule, ...) fall back to a hash of
  *    the envelope minus sent_at, so a resend of identical content collapses.
  */
-export async function dedupeKey(env: PushEnvelope): Promise<{ key: string; source: "meta.content_hash" | "derived" }> {
+export async function dedupeKey(env: PushEnvelope): Promise<{ key: string; source: "event_id" | "meta.content_hash" | "derived" }> {
+  // 1.1: event_id is stable across retries, so it is the dedupe key.
+  if (env.v11?.event_id) return { key: `eid:${env.v11.event_id}`, source: "event_id" };
   const ch = env.meta?.content_hash;
   if (typeof ch === "string" && ch.trim()) {
     return { key: `${env.event}|ch:${ch.trim()}`, source: "meta.content_hash" };
@@ -105,6 +114,6 @@ export async function dedupeKey(env: PushEnvelope): Promise<{ key: string; sourc
   if (raceParts.length > 0) {
     return { key: `${base}|${raceParts.join(",")}`, source: "derived" };
   }
-  const { sent_at: _drop, ...rest } = env;
+  const { sent_at: _drop, v11: _v11, ...rest } = env;
   return { key: `${base}|body:${await sha256Hex(canonicalJson(rest))}`, source: "derived" };
 }

@@ -2,6 +2,8 @@
 // Exposes analysis state only. Never returns secrets or raw webhook bodies.
 import type { Env } from "./env";
 import { healthBody } from "./http";
+import { nowMs, toHkt } from "./env";
+import { QUALITY_FLAGS, streamStatus } from "./quality";
 
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_VERSION = SUPPORTED_VERSIONS[0];
@@ -102,6 +104,38 @@ const TOOLS = [
       type: "object",
       properties: { id: { type: "string" } },
       required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: READ_ONLY,
+  },
+  {
+    name: "get_ledger",
+    title: "Odds ledger replay",
+    description: "Replays the append-only odds ledger for one meeting day: every WIN/PLA odds change per race and runner, in seq order (hkjc-push/1.1) then arrival order (1.0 snapshots). prev_odds is filled from the trajectory when the push did not carry it. Rows with post_race=true arrived after the race started and must not be used for pre-race analysis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        meeting_date: { type: "string", description: "YYYY-MM-DD" },
+        race_no: { type: "integer", minimum: 1, maximum: 20 },
+        runner_no: { type: "integer", minimum: 1, maximum: 30 },
+        bet_type: { type: "string", enum: ["WIN", "PLA"] },
+        since_seq: { type: "integer", minimum: 0, description: "Only rows with seq greater than this (1.1 events)." },
+        exclude_post_race: { type: "boolean", description: "Drop rows received after the race started. Default false." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 200." },
+      },
+      required: ["meeting_date"],
+      additionalProperties: false,
+    },
+    annotations: READ_ONLY,
+  },
+  {
+    name: "get_data_quality",
+    title: "Data quality for a meeting day",
+    description: "Data-quality report for one meeting day: last event time (HKT), last seq, open seq gaps, counts per quality flag (missing_source_time, gap, out_of_order, duplicate, future_timestamp, post_start, late), delay statistics, quarantined analysis fields, stream status (ok, stale, broken, no_data) and an overall data_quality_status.",
+    inputSchema: {
+      type: "object",
+      properties: { meeting_date: { type: "string", description: "YYYY-MM-DD" } },
+      required: ["meeting_date"],
       additionalProperties: false,
     },
     annotations: READ_ONLY,
@@ -264,10 +298,12 @@ async function runTool(name: string, args: Record<string, unknown>, env: Env): P
       if (et) { where.push("event_type = ?"); binds.push(et); }
       if (md) { where.push("meeting_date = ?"); binds.push(md); }
       const rows = await db.prepare(
-        `SELECT id, event_type, meeting_date, venue, race_nos, snapshot_time, received_at, status, workflow, attempts, last_error, duplicate_count, run_id
+        `SELECT id, event_type, schema_version, meeting_date, venue, race_nos, snapshot_time, received_at, received_at_hkt, event_id, seq,
+           delay_received_sent_ms, delay_received_captured_ms, delay_captured_source_ms, quality_flags, post_race,
+           status, workflow, attempts, last_error, duplicate_count, run_id
          FROM inbox_events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY received_at DESC LIMIT ?`,
       ).bind(...binds, limit).all<Record<string, unknown>>();
-      return { events: (rows.results ?? []).map((r) => ({ ...r, race_nos: parseJson(r.race_nos) })) as Json[] };
+      return { events: (rows.results ?? []).map((r) => ({ ...r, race_nos: parseJson(r.race_nos), quality_flags: parseJson(r.quality_flags), post_race: r.post_race === 1 })) as Json[] };
     }
 
     case "list_recent_runs": {
@@ -342,8 +378,142 @@ async function runTool(name: string, args: Record<string, unknown>, env: Env): P
         runs: (runs.results ?? []).map(({ conclusion_json, ...r }) => ({ ...r, race_nos: parseJson(r.race_nos), conclusion: parseJson(conclusion_json) })) as Json[],
       };
     }
+
+    case "get_ledger":
+      return getLedger(db, args);
+
+    case "get_data_quality":
+      return getDataQuality(db, dateArg(args.meeting_date));
   }
   throw new ToolInputError(`unknown tool: ${name}`);
+}
+
+function dateArg(v: unknown): string {
+  const s = reqString(v, "meeting_date", 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new ToolInputError("meeting_date must be YYYY-MM-DD");
+  return s;
+}
+function optInt(v: unknown, name: string, min: number, max: number): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < min || n > max) throw new ToolInputError(`${name} must be an integer between ${min} and ${max}`);
+  return n;
+}
+
+const LEDGER_SCAN_CAP = 5000;
+
+async function getLedger(db: D1Database, args: Record<string, unknown>): Promise<Record<string, Json>> {
+  const md = dateArg(args.meeting_date);
+  const raceNo = optInt(args.race_no, "race_no", 1, 20);
+  const runnerNo = optInt(args.runner_no, "runner_no", 1, 30);
+  const sinceSeq = optInt(args.since_seq, "since_seq", 0, Number.MAX_SAFE_INTEGER);
+  const limit = optInt(args.limit, "limit", 1, 500) ?? 200;
+  const bt = optString(args.bet_type, "bet_type", 3);
+  if (bt && bt !== "WIN" && bt !== "PLA") throw new ToolInputError("bet_type must be WIN or PLA");
+  const excludePost = args.exclude_post_race === true;
+  const where = ["meeting_date = ?"];
+  const binds: unknown[] = [md];
+  if (raceNo !== undefined) { where.push("race_no = ?"); binds.push(raceNo); }
+  if (runnerNo !== undefined) { where.push("runner_no = ?"); binds.push(runnerNo); }
+  if (bt) { where.push("bet_type = ?"); binds.push(bt); }
+  // since_seq is applied after replay so prev_odds can still be derived from earlier rows.
+  const rows = await db.prepare(
+    `SELECT id, event_id, seq, schema_version, venue, race_no, runner_no, name_zh, name_en, bet_type, prev_odds, new_odds, odds_basis,
+            captured_at, received_at_hkt, post_race, quality_flags
+     FROM odds_ledger WHERE ${where.join(" AND ")} ORDER BY seq IS NULL, seq, id LIMIT ?`,
+  ).bind(...binds, LEDGER_SCAN_CAP + 1).all<Record<string, unknown>>();
+  const all = rows.results ?? [];
+  const truncated = all.length > LEDGER_SCAN_CAP;
+  const last = new Map<string, number | null>();
+  const replay: Record<string, Json>[] = [];
+  for (const r of all.slice(0, LEDGER_SCAN_CAP)) {
+    const k = `${r.race_no}|${r.runner_no}|${r.bet_type}`;
+    const prev = (r.prev_odds as number | null) ?? last.get(k) ?? null;
+    if (!(excludePost && r.post_race === 1)) last.set(k, r.new_odds as number | null);
+    replay.push({ ...(r as Record<string, Json>), prev_odds: prev, post_race: r.post_race === 1, quality_flags: parseJson(r.quality_flags) });
+  }
+  const filtered = replay.filter((r) => (!excludePost || r.post_race === false) && (sinceSeq === undefined || (typeof r.seq === "number" && r.seq > sinceSeq)));
+  return {
+    meeting_date: md,
+    count: Math.min(filtered.length, limit),
+    has_more: filtered.length > limit,
+    scan_truncated: truncated,
+    entries: filtered.slice(0, limit) as Json[],
+  };
+}
+
+async function getDataQuality(db: D1Database, md: string): Promise<Record<string, Json>> {
+  const st = await db.prepare(`SELECT * FROM stream_state WHERE meeting_date = ?`).bind(md).first<Record<string, unknown>>();
+  const sched = await db.prepare(`SELECT race_no, post_time FROM race_schedule WHERE meeting_date = ? ORDER BY race_no`).bind(md)
+    .all<{ race_no: number; post_time: string }>();
+  const postTimes = (sched.results ?? []).map((r) => r.post_time);
+  const lastEvent = (st?.last_event_received_at as string | null) ?? null;
+  const lastHb = (st?.last_heartbeat_at as string | null) ?? null;
+  const lastSeen = [lastEvent, lastHb].filter((x): x is string => !!x).sort().pop() ?? null;
+  const now = nowMs();
+  const stream = streamStatus(now, lastSeen, postTimes);
+
+  const flagRows = await db.prepare(
+    `SELECT j.value AS flag, COUNT(*) AS n FROM inbox_events, json_each(COALESCE(inbox_events.quality_flags, '[]')) AS j
+     WHERE inbox_events.meeting_date = ? GROUP BY j.value`,
+  ).bind(md).all<{ flag: string; n: number }>();
+  const flag_counts: Record<string, number> = Object.fromEntries(QUALITY_FLAGS.map((f) => [f, 0]));
+  for (const r of flagRows.results ?? []) flag_counts[r.flag] = r.n;
+
+  const seqs = await db.prepare(`SELECT DISTINCT seq FROM inbox_events WHERE meeting_date = ? AND seq IS NOT NULL ORDER BY seq`).bind(md)
+    .all<{ seq: number }>();
+  const open_gaps: Json[] = [];
+  const list = (seqs.results ?? []).map((r) => r.seq);
+  for (let i = 1; i < list.length; i++) {
+    if (list[i] > list[i - 1] + 1) open_gaps.push({ from_seq: list[i - 1] + 1, to_seq: list[i] - 1 });
+  }
+  const detected = await db.prepare(`SELECT COUNT(*) AS n FROM seq_gaps WHERE meeting_date = ?`).bind(md).first<{ n: number }>();
+
+  const delays = await db.prepare(
+    `SELECT COUNT(*) AS events,
+       AVG(delay_received_sent_ms) AS avg_received_sent_ms, MAX(delay_received_sent_ms) AS max_received_sent_ms,
+       AVG(delay_received_captured_ms) AS avg_received_captured_ms, MAX(delay_received_captured_ms) AS max_received_captured_ms,
+       AVG(delay_captured_source_ms) AS avg_captured_source_ms, MAX(delay_captured_source_ms) AS max_captured_source_ms,
+       SUM(post_race) AS post_race_events
+     FROM inbox_events WHERE meeting_date = ?`,
+  ).bind(md).first<Record<string, number | null>>();
+  const quarantine = await db.prepare(
+    `SELECT COUNT(*) AS n FROM analysis_validation v JOIN analysis_runs r ON r.id = v.run_id
+     WHERE r.meeting_date = ? AND v.status = 'quarantined'`,
+  ).bind(md).first<{ n: number }>();
+
+  const serious = flag_counts.gap + flag_counts.out_of_order + flag_counts.future_timestamp + flag_counts.late;
+  const data_quality_status =
+    stream.status === "no_data" ? "no_data"
+      : stream.status === "broken" || open_gaps.length > 0 ? "bad"
+      : stream.status === "stale" || serious > 0 ? "degraded"
+      : "ok";
+  const round = (v: number | null | undefined) => (v === null || v === undefined ? null : Math.round(v));
+  return {
+    meeting_date: md,
+    now_hkt: toHkt(now),
+    last_event_received_at: lastEvent,
+    last_event_hkt: (st?.last_event_hkt as string | null) ?? null,
+    last_heartbeat_at: lastHb,
+    last_seq: (st?.last_seq as number | null) ?? null,
+    last_change_seq: (st?.last_change_seq as number | null) ?? null,
+    stream_status: stream.status,
+    fast_window: stream.fast_window,
+    expected_interval_ms: stream.expected_interval_ms,
+    silence_ms: stream.silence_ms,
+    open_gaps,
+    gaps_detected: detected?.n ?? 0,
+    flag_counts,
+    delays: {
+      events: delays?.events ?? 0,
+      avg_received_sent_ms: round(delays?.avg_received_sent_ms), max_received_sent_ms: delays?.max_received_sent_ms ?? null,
+      avg_received_captured_ms: round(delays?.avg_received_captured_ms), max_received_captured_ms: delays?.max_received_captured_ms ?? null,
+      avg_captured_source_ms: round(delays?.avg_captured_source_ms), max_captured_source_ms: delays?.max_captured_source_ms ?? null,
+    },
+    post_race_events: delays?.post_race_events ?? 0,
+    quarantined_fields: quarantine?.n ?? 0,
+    data_quality_status,
+  };
 }
 
 async function getRun(db: D1Database, runId: string): Promise<Record<string, Json>> {
@@ -354,7 +524,11 @@ async function getRun(db: D1Database, runId: string): Promise<Record<string, Jso
     `SELECT round, role_id, kind, status, output_json, error, created_at FROM run_steps WHERE run_id = ? ORDER BY round, role_id`,
   ).bind(runId).all<Record<string, unknown>>();
   const { conclusion_json, disagreements_json, ...rest } = run;
+  const validation = await db.prepare(
+    `SELECT role_id, race_no, runner_no, bet_type, p, odds, odds_basis, fair_odds, ev, status, reason FROM analysis_validation WHERE run_id = ? ORDER BY id`,
+  ).bind(runId).all<Record<string, Json>>();
   return {
+    validation: (validation.results ?? []) as Json[],
     run: { ...rest, race_nos: parseJson(rest.race_nos), conclusion: parseJson(conclusion_json), disagreements: parseJson(disagreements_json) } as Json,
     steps: (steps.results ?? []).map(({ output_json, ...s }) => ({ ...s, output: parseJson(output_json) })) as Json[],
   };

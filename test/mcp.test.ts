@@ -22,7 +22,7 @@ describe("read-only MCP", () => {
 
     const list = await rpc(env, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const names = list.body.result.tools.map((t: any) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["get_status", "list_recent_events", "list_recent_runs", "get_run", "get_race_analysis", "search", "fetch"]));
+    expect(names).toEqual(expect.arrayContaining(["get_status", "list_recent_events", "list_recent_runs", "get_run", "get_race_analysis", "search", "fetch", "get_ledger", "get_data_quality"]));
     expect(list.body.result.tools.every((t: any) => t.annotations.readOnlyHint === true)).toBe(true);
 
     await db.prepare(`INSERT INTO inbox_events (id, dedupe_key, dedupe_source, event_type, meeting_date, venue, race_nos, raw_body, received_at, signature_status, status, updated_at)

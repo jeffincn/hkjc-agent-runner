@@ -2,7 +2,7 @@
   "name": "hkjc-agent-runner",
   "version": "0.1.0",
   "private": true,
-  "description": "Receives hkjc-push/1.0 webhooks from hkjc-data-worker, stores them in D1, and runs multi-role analysis via Queues.",
+  "description": "Receives hkjc-push/1.0 and 1.1 webhooks from hkjc-data-worker, stores them in D1, and runs multi-role analysis via Queues.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

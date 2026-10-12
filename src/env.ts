@@ -28,5 +28,26 @@ export function envInt(v: string | undefined, def: number, min: number, max: num
 }
 
 export function nowIso(): string {
-  return new Date().toISOString();
+  return new Date(nowMs()).toISOString();
+}
+
+let clockOverride: (() => number) | null = null;
+/** Wall clock in ms. Tests may pin it with setClockForTest. */
+export function nowMs(): number {
+  return clockOverride ? clockOverride() : Date.now();
+}
+export function setClockForTest(fn: (() => number) | null): void {
+  clockOverride = fn;
+}
+
+/** ISO-8601 in Hong Kong time with an explicit +08:00 offset, e.g. 2026-10-07T18:30:05.123+08:00. */
+export function toHkt(ms: number): string {
+  return new Date(ms + 8 * 3600_000).toISOString().replace("Z", "+08:00");
+}
+
+/** Parse an ISO timestamp (any offset) to epoch ms; null when absent or unparsable. */
+export function parseTs(v: unknown): number | null {
+  if (typeof v !== "string" || !v) return null;
+  const n = Date.parse(v);
+  return Number.isFinite(n) ? n : null;
 }

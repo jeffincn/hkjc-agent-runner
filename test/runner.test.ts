@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleMessage } from "../src/consumer";
 import { routeEvent } from "../src/router";
 import { setRolesForTest } from "../src/roles";
+import { setClockForTest } from "../src/env";
 import { handleWebhook } from "../src/webhook";
 import { runDispatcher } from "../src/outbox";
 import { handleHealth, handleGetRun } from "../src/http";
@@ -30,8 +31,10 @@ function scripted(handler: (input: string, schemaName: string) => unknown, calls
   };
 }
 
-beforeEach(useFixtureRoles);
-afterEach(() => setRolesForTest(null));
+// Fixtures are dated 2026-10-07 (races off at 18:35 HKT); pin the clock to that morning
+// so they are pre-race regardless of when the suite runs.
+beforeEach(() => { useFixtureRoles(); setClockForTest(() => Date.parse("2026-10-07T12:00:05+08:00")); });
+afterEach(() => { setRolesForTest(null); setClockForTest(null); });
 
 describe("webhook signature and dedupe", () => {
   it("accepts a correct signature and rejects a wrong one", async () => {

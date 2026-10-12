@@ -38,6 +38,39 @@ export interface NewInbox {
   workflow: string;
   delay_seconds: number;
   odds_races?: { race_no: number; snapshot_time: string }[];
+  /** Receive instant (ms); defaults to now. */
+  received_ms?: number;
+  quality?: InboundQuality;
+}
+
+export interface LedgerEntry {
+  race_no: number;
+  runner_no: number;
+  name_zh: string | null;
+  name_en: string | null;
+  bet_type: "WIN" | "PLA";
+  prev_odds: number | null;
+  new_odds: number | null;
+  odds_basis: string | null;
+  post_race: boolean;
+}
+
+export interface InboundQuality {
+  event_id: string | null;
+  seq: number | null;
+  captured_at: string | null;
+  source_updated_at: string | null;
+  source_url: string | null;
+  received_at_hkt: string;
+  delay_received_sent_ms: number | null;
+  delay_received_captured_ms: number | null;
+  delay_captured_source_ms: number | null;
+  flags: string[];
+  post_race: boolean;
+  gap: { from_seq: number; to_seq: number } | null;
+  heartbeat: { last_change_seq: number | null } | null;
+  schedule: { race_no: number; post_time: string }[];
+  ledger: LedgerEntry[];
 }
 
 /**
@@ -46,14 +79,17 @@ export interface NewInbox {
  */
 export async function persistInbound(db: D1Database, ev: NewInbox): Promise<{ id: string; duplicate: boolean }> {
   const id = uuid();
-  const now = nowIso();
+  const now = ev.received_ms !== undefined ? new Date(ev.received_ms).toISOString() : nowIso();
+  const q = ev.quality;
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
         `INSERT INTO inbox_events (id, dedupe_key, dedupe_source, event_type, schema_version, meeting_date, venue,
            race_nos, snapshot_time, sent_at, raw_body, received_at, signature_status, status, workflow, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'received',?,?)
-         ON CONFLICT(dedupe_key) DO UPDATE SET duplicate_count = duplicate_count + 1, updated_at = excluded.updated_at`,
+         ON CONFLICT(dedupe_key) DO UPDATE SET duplicate_count = duplicate_count + 1, updated_at = excluded.updated_at,
+           quality_flags = CASE WHEN COALESCE(quality_flags, '[]') LIKE '%"duplicate"%' THEN quality_flags
+                                ELSE json_insert(COALESCE(quality_flags, '[]'), '$[#]', 'duplicate') END`,
       )
       .bind(
         id,
@@ -71,6 +107,18 @@ export async function persistInbound(db: D1Database, ev: NewInbox): Promise<{ id
         ev.signature_status,
         ev.workflow,
         now,
+      ),
+    // Quality columns are written only on the row we just created (no-op on a duplicate).
+    db
+      .prepare(
+        `UPDATE inbox_events SET event_id = ?, seq = ?, captured_at = ?, source_updated_at = ?, source_url = ?, received_at_hkt = ?,
+           delay_received_sent_ms = ?, delay_received_captured_ms = ?, delay_captured_source_ms = ?, quality_flags = ?, post_race = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        q?.event_id ?? null, q?.seq ?? null, q?.captured_at ?? null, q?.source_updated_at ?? null, q?.source_url ?? null,
+        q?.received_at_hkt ?? null, q?.delay_received_sent_ms ?? null, q?.delay_received_captured_ms ?? null,
+        q?.delay_captured_source_ms ?? null, JSON.stringify(q?.flags ?? []), q?.post_race ? 1 : 0, id,
       ),
     // Only creates an outbox row when the inbox row above is ours (new).
     db
@@ -93,6 +141,7 @@ export async function persistInbound(db: D1Database, ev: NewInbox): Promise<{ id
         .bind(ev.meeting_date ?? "", ev.venue ?? "", r.race_no, r.snapshot_time, id, now, id),
     );
   }
+  if (q) stmts.push(...qualityStatements(db, ev, q, id, now));
   await db.batch(stmts);
   const row = await db
     .prepare(`SELECT id FROM inbox_events WHERE dedupe_key = ?`)
@@ -160,5 +209,56 @@ export async function getMetaMap(db: D1Database): Promise<Record<string, { value
   const rows = await db.prepare(`SELECT key, value, updated_at FROM runner_meta`).all<{ key: string; value: string; updated_at: string }>();
   const out: Record<string, { value: string; updated_at: string }> = {};
   for (const r of rows.results ?? []) out[r.key] = { value: r.value, updated_at: r.updated_at };
+  return out;
+}
+
+const IF_NEW = `EXISTS (SELECT 1 FROM inbox_events WHERE id = ?)`;
+
+function qualityStatements(db: D1Database, ev: NewInbox, q: InboundQuality, id: string, now: string): D1PreparedStatement[] {
+  const out: D1PreparedStatement[] = [];
+  const md = ev.meeting_date;
+  for (const s of q.schedule) {
+    if (!md) break;
+    out.push(
+      db.prepare(
+        `INSERT INTO race_schedule (meeting_date, race_no, venue, post_time, updated_at) SELECT ?, ?, ?, ?, ? WHERE ${IF_NEW}
+         ON CONFLICT(meeting_date, race_no) DO UPDATE SET post_time = excluded.post_time, venue = COALESCE(excluded.venue, race_schedule.venue), updated_at = excluded.updated_at`,
+      ).bind(md, s.race_no, ev.venue, s.post_time, now, id),
+    );
+  }
+  if (md) {
+    const hb = q.heartbeat;
+    out.push(
+      db.prepare(
+        `INSERT INTO stream_state (meeting_date, last_event_received_at, last_event_hkt, last_seq, last_heartbeat_at, last_change_seq, updated_at)
+         SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${IF_NEW}
+         ON CONFLICT(meeting_date) DO UPDATE SET
+           last_event_received_at = MAX(COALESCE(stream_state.last_event_received_at, ''), excluded.last_event_received_at),
+           last_event_hkt = CASE WHEN excluded.last_event_received_at >= COALESCE(stream_state.last_event_received_at, '') THEN excluded.last_event_hkt ELSE stream_state.last_event_hkt END,
+           last_seq = CASE WHEN excluded.last_seq IS NULL THEN stream_state.last_seq ELSE MAX(COALESCE(stream_state.last_seq, excluded.last_seq), excluded.last_seq) END,
+           last_heartbeat_at = COALESCE(excluded.last_heartbeat_at, stream_state.last_heartbeat_at),
+           last_change_seq = COALESCE(excluded.last_change_seq, stream_state.last_change_seq),
+           updated_at = excluded.updated_at`,
+      ).bind(md, now, q.received_at_hkt, q.seq, hb ? now : null, hb?.last_change_seq ?? null, now, id),
+    );
+    if (q.gap) {
+      out.push(
+        db.prepare(`INSERT OR IGNORE INTO seq_gaps (meeting_date, from_seq, to_seq, detected_at) SELECT ?, ?, ?, ? WHERE ${IF_NEW}`)
+          .bind(md, q.gap.from_seq, q.gap.to_seq, now, id),
+      );
+    }
+    for (const l of q.ledger) {
+      out.push(
+        db.prepare(
+          `INSERT INTO odds_ledger (inbox_id, event_id, seq, schema_version, meeting_date, venue, race_no, runner_no, name_zh, name_en,
+             bet_type, prev_odds, new_odds, odds_basis, captured_at, received_at_hkt, post_race, quality_flags)
+           SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${IF_NEW}`,
+        ).bind(
+          id, q.event_id, q.seq, ev.schema_version, md, ev.venue, l.race_no, l.runner_no, l.name_zh, l.name_en,
+          l.bet_type, l.prev_odds, l.new_odds, l.odds_basis, q.captured_at, q.received_at_hkt, l.post_race ? 1 : 0, JSON.stringify(q.flags), id,
+        ),
+      );
+    }
+  }
   return out;
 }
