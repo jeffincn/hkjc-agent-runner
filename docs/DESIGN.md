@@ -56,7 +56,7 @@
 
 | 标记 | 规则 |
 |---|---|
-| `missing_source_time` | 1.0 一律；1.1 中 `source.last_updated_at` 为 null 或上游 `quality.missing_source_time = true` |
+| `missing_source_time` | 仅在期望有源时间的事件上标记（`odds_update` / `odds_delta` / `lock` / `result` / `dividends` / `scratch` 等）。`schedule`、`runs_update`（往绩/form）、`horse_update`、`no_update` 心跳上游确认无源时间：仍记 null，不标此旗。其余：1.0 无源时间，或 1.1 中 `source.last_updated_at` 为 null / 上游 `quality.missing_source_time = true` |
 | `gap` | `seq` 比当天已见最大 seq 大 1 以上；缺口写入 `seq_gaps` |
 | `out_of_order` | `seq` ≤ 当天已见最大 seq（且不是重复 seq） |
 | `duplicate` | 同一 `event_id` 重投，或同一 seq 换了 `event_id` |

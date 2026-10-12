@@ -184,6 +184,47 @@ describe("quality flags", () => {
     expect(q.data_quality_status).toBe("bad");
   });
 
+  it("does not flag missing_source_time when HKJC never supplies one (schedule, runs_update, horse_update, no_update)", async () => {
+    const db = await freshDb();
+    const env = testEnv(db, fakeQueue());
+    const nullSource = { name: "HKJC GraphQL", url: "https://example.invalid/odds", last_updated_at: null };
+    // 1.0 schedule / horse_update / runs_update: no source fields at all
+    await post(env, envelope({ event: "schedule", races: [race(1, "2026-10-07T11:00:00+08:00")] }));
+    now += 1000;
+    await post(env, envelope({ event: "horse_update", races: [], meta: { content_hash: "hu-1" } }));
+    now += 1000;
+    await post(env, envelope({ event: "runs_update", races: [], meta: { content_hash: "ru-1" } }));
+    // 1.1 no_update heartbeat with explicit null source + upstream quality.missing_source_time
+    now += 1000;
+    await post(env, v11({
+      event: "no_update", event_id: eid(2), seq: 2, changes: undefined, pools: undefined,
+      source: nullSource, quality: { missing_source_time: true, post_start: false, late_ms: 0 },
+      last_change_seq: null, last_change_at: null,
+    }));
+    // Control: odds_update / odds_delta still flagged when source is missing
+    now += 1000;
+    await post(env, envelope({ event: "odds_update", races: [race(1, "2026-10-07T11:59:30+08:00")] }));
+    now += 1000;
+    await post(env, v11({
+      event_id: eid(3), seq: 3, source: nullSource,
+      quality: { missing_source_time: true, post_start: false, late_ms: 0 },
+    }));
+
+    const rows = await db.prepare(
+      `SELECT event_type, quality_flags, source_updated_at FROM inbox_events ORDER BY received_at, rowid`,
+    ).all<any>();
+    const byType = Object.fromEntries(rows.results.map((r: any) => [r.event_type, r]));
+    for (const t of ["schedule", "horse_update", "runs_update", "no_update"]) {
+      expect(JSON.parse(byType[t].quality_flags)).not.toContain("missing_source_time");
+      expect(byType[t].source_updated_at).toBeNull();
+    }
+    expect(JSON.parse(byType.odds_update.quality_flags)).toContain("missing_source_time");
+    expect(JSON.parse(byType.odds_delta.quality_flags)).toContain("missing_source_time");
+    const q = (await tool(env, "get_data_quality", { meeting_date: MD })).structuredContent;
+    // Only the two odds events should contribute to the missing_source_time count
+    expect(q.flag_counts.missing_source_time).toBe(2);
+  });
+
   it("marks events after the race start as post-race and keeps them out of pre-race analysis", async () => {
     const db = await freshDb();
     const queue = fakeQueue();
@@ -236,14 +277,22 @@ describe("stream liveness", () => {
     const env = testEnv(db, fakeQueue());
     await post(env, v11());
     now += 9 * 60_000;
-    await post(env, v11({ event: "no_update", event_id: eid(2), seq: 2, changes: undefined, pools: undefined,
-      last_change_seq: 1, last_change_at: "2026-10-07T11:59:58+08:00" }));
+    await post(env, v11({
+      event: "no_update", event_id: eid(2), seq: 2, changes: undefined, pools: undefined,
+      source: { name: "HKJC GraphQL", url: "https://example.invalid/odds", last_updated_at: null },
+      quality: { missing_source_time: true, post_start: false, late_ms: 0 },
+      last_change_seq: 1, last_change_at: "2026-10-07T11:59:58+08:00",
+    }));
+    const hb = await db.prepare(`SELECT quality_flags, source_updated_at FROM inbox_events WHERE event_type = 'no_update'`).first<any>();
+    expect(JSON.parse(hb.quality_flags)).not.toContain("missing_source_time");
+    expect(hb.source_updated_at).toBeNull();
     now += 60_000;
     let q = (await tool(env, "get_data_quality", { meeting_date: MD })).structuredContent;
     expect(q.stream_status).toBe("ok");
     expect(q.last_change_seq).toBe(1);
     expect(q.last_seq).toBe(2);
     expect(q.last_event_hkt).toBe(toHkt(T0 + 9 * 60_000));
+    expect(q.flag_counts.missing_source_time).toBe(0);
     now += 15 * 60_000;
     q = (await tool(env, "get_data_quality", { meeting_date: MD })).structuredContent;
     expect(q.stream_status).toBe("stale");
