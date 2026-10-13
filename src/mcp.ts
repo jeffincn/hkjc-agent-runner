@@ -4,7 +4,7 @@ import type { Env } from "./env";
 import { healthBody } from "./http";
 import { nowMs, toHkt } from "./env";
 import { QUALITY_FLAGS, streamStatus } from "./quality";
-import { loadOddsMovement } from "./oddsMovement";
+import { loadOddsMovement, runnerKey } from "./oddsMovement";
 
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_VERSION = SUPPORTED_VERSIONS[0];
@@ -144,13 +144,13 @@ const TOOLS = [
   {
     name: "get_odds_movement",
     title: "Odds movement / change density",
-    description: "Odds change density computed from the append-only odds ledger, per race + horse + WIN/PLA and per HKT minute bucket: change count, each change's absolute and % move, implied probability (1/odds) change, cumulative drift from the first seen odds, and flags sudden_jump (odds up >= 15% in one change), sudden_drop (odds down >= 15%), prob_shift (implied probability moves >= 3 points) and burst (>= 8 changes in one minute; upstream samples every 3-5 s, max ~12-20/min). Use it to spot horses being pushed in or out.",
+    description: "Odds change density computed from the append-only odds ledger, per race + horse + WIN/PLA and per HKT minute bucket: change count, each change's absolute and % move, implied probability (1/odds) change, cumulative drift from the first seen odds, and flags sudden_jump (odds up >= 15% in one change), sudden_drop (odds down >= 15%), prob_shift (implied probability moves >= 3 points) and burst (>= 8 changes in one minute; upstream samples every 3-5 s, max ~12-20/min). Series are keyed by runner_id (stable HKJC horse code; falls back to runner number for older data) and Standby runners are excluded. Use it to spot horses being pushed in or out.",
     inputSchema: {
       type: "object",
       properties: {
         race_date: { type: "string", description: "Meeting date YYYY-MM-DD" },
         race_no: { type: "integer", minimum: 1, maximum: 20 },
-        horse: { type: "string", description: "Runner number (e.g. \"7\") or part of the Chinese or English horse name." },
+        horse: { type: "string", description: "runner_id (exact), runner number (e.g. \"7\") or part of the Chinese or English horse name." },
         bet_type: { type: "string", enum: ["WIN", "PLA"] },
         exclude_post_race: { type: "boolean", description: "Drop ledger rows received after the race started. Default true." },
         include_changes: { type: "boolean", description: "Include every individual change. Default true; set false for a compact summary." },
@@ -452,7 +452,7 @@ async function getLedger(db: D1Database, args: Record<string, unknown>): Promise
   if (bt) { where.push("bet_type = ?"); binds.push(bt); }
   // since_seq is applied after replay so prev_odds can still be derived from earlier rows.
   const rows = await db.prepare(
-    `SELECT id, event_id, seq, schema_version, venue, race_no, runner_no, name_zh, name_en, bet_type, prev_odds, new_odds, odds_basis,
+    `SELECT id, event_id, seq, schema_version, venue, race_no, runner_no, runner_id, horse_name, status, pool, name_zh, name_en, bet_type, prev_odds, new_odds, odds_basis,
             captured_at, received_at_hkt, post_race, quality_flags
      FROM odds_ledger WHERE ${where.join(" AND ")} ORDER BY seq IS NULL, seq, id LIMIT ?`,
   ).bind(...binds, LEDGER_SCAN_CAP + 1).all<Record<string, unknown>>();
@@ -461,7 +461,7 @@ async function getLedger(db: D1Database, args: Record<string, unknown>): Promise
   const last = new Map<string, number | null>();
   const replay: Record<string, Json>[] = [];
   for (const r of all.slice(0, LEDGER_SCAN_CAP)) {
-    const k = `${r.race_no}|${r.runner_no}|${r.bet_type}`;
+    const k = `${r.race_no}|${runnerKey(r as { runner_id: string | null; runner_no: number })}|${r.bet_type}`;
     const prev = (r.prev_odds as number | null) ?? last.get(k) ?? null;
     if (!(excludePost && r.post_race === 1)) last.set(k, r.new_odds as number | null);
     replay.push({ ...(r as Record<string, Json>), prev_odds: prev, post_race: r.post_race === 1, quality_flags: parseJson(r.quality_flags) });

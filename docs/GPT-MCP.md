@@ -21,9 +21,9 @@ https://hkjc-agent.cf-connect.top/mcp
 | `get_race_analysis` | `meeting_date`、`venue`、`race_no` | 单场赛前观点（是否已锁定）和涉及这场的分析 |
 | `search` | `query` | 按日期、场地、流程、状态搜分析，返回可给 `fetch` 用的 id |
 | `fetch` | `id` | 一次分析的完整文档 |
-| `get_ledger` | `meeting_date`（必填）、`race_no`、`runner_no`、`bet_type`(WIN/PLA)、`since_seq`、`exclude_post_race`、`limit`(1–500，默认 200) | 从追加型赔率账本回放赔率轨迹，按 seq 再按到达顺序；`post_race=true` 的行是开跑后才收到的，不能用于赛前分析 |
+| `get_ledger` | `meeting_date`（必填）、`race_no`、`runner_no`、`bet_type`(WIN/PLA)、`since_seq`、`exclude_post_race`、`limit`(1–500，默认 200) | 从追加型赔率账本回放赔率轨迹，按 seq 再按到达顺序；`post_race=true` 的行是开跑后才收到的，不能用于赛前分析。每行含 `runner_id`、`status`(Declared/Standby)、`pool`、`horse_name`（旧数据为 null）；`prev_odds` 按 `runner_id` 回放（无 `runner_id` 时按马号） |
 | `get_data_quality` | `meeting_date` | 最后事件时间（HKT）、最后 seq、未补的 seq 缺口、各质量标记计数、延迟统计、被隔离的分析字段数、流状态（ok/stale/broken/no_data）和总体 `data_quality_status` |
-| `get_odds_movement` | `race_date`（必填，YYYY-MM-DD）、`race_no`、`horse`（马号或中/英文马名片段）、`bet_type`(WIN/PLA)、`exclude_post_race`（默认 true）、`include_changes`（默认 true） | 由赔率账本计算的赔率变化密度：按 场次+马+WIN/PLA 和每分钟（HKT）分桶给出变化次数、每次变化的绝对值和百分比、隐含概率（1/赔率）变化、相对首个赔率的累计漂移，以及 `sudden_jump`/`sudden_drop`/`prob_shift`/`burst` 标记；阈值见 `thresholds` 字段与 DESIGN.md |
+| `get_odds_movement` | `race_date`（必填，YYYY-MM-DD）、`race_no`、`horse`（`runner_id`、马号或中/英文马名片段）、`bet_type`(WIN/PLA)、`exclude_post_race`（默认 true）、`include_changes`（默认 true） | 由赔率账本计算的赔率变化密度：按 场次+马+WIN/PLA 和每分钟（HKT）分桶给出变化次数、每次变化的绝对值和百分比、隐含概率（1/赔率）变化、相对首个赔率的累计漂移，以及 `sudden_jump`/`sudden_drop`/`prob_shift`/`burst` 标记；阈值见 `thresholds` 字段与 DESIGN.md。序列按 `runner_id` 分组（旧 1.0/1.1 数据无 `runner_id` 时回退到马号），`Standby`（后备）马匹的行不计入密度/变动统计 |
 
 `list_recent_events` 现在也返回 `received_at_hkt`、`event_id`、`seq`、三项延迟、`quality_flags` 和 `post_race`。`get_run` 多了 `validation`：每个角色每匹马 WIN/PLA 的 P、赔率、Fair、EV，或隔离原因。
 
@@ -68,3 +68,10 @@ curl -s https://hkjc-agent.cf-connect.top/mcp \
 ## 现在能读到什么
 
 分析还没真正跑起来。要先导入八角色 ZIP，再设好 `OPENAI_API_KEY` 和 `OPENAI_MODEL`。在那之前，`list_recent_runs` 基本是空的，事件会显示 `failed`，错误是 `no roles loaded`。
+
+## runner_id / 后备马（hkjc-worker 740b52d3 起）
+
+- `odds_delta.changes[]` 新增 `runner_id`（来自 HKJC horse.code，稳定）、`race_no`、`horse_no`、`horse_name`、`status`（Declared|Standby）、`pool`（WIN|PLA）、`captured_at`/`seq`/`sample_interval_s`。
+- 账本 `odds_ledger` 新增列 `runner_id`、`horse_name`、`status`、`pool`（迁移 `0003_runner_id.sql`，仅新增列与索引，旧行保持 NULL）。
+- 以前按马号作键，同号的后备马会覆盖正选马赔率；现在按 `runner_id` 作键，后备马单独存储，且不进入 `get_odds_movement` 统计。
+- 全量快照 `odds_update` 的 `meta.covered_races` / `missing_races` / `race_source_ts`(+08:00) 原样保存在事件原文中；快照中的 runner 若带 `runner_id`/`status` 也会写入账本。

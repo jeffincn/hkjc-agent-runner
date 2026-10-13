@@ -1,0 +1,21 @@
+{
+  "_comment": "Desensitized hkjc-worker 740b52d3 odds_delta: fake runner codes, names, UUIDs, example.invalid URLs. Declared #5 and Standby #5 share horse_no in race 2.",
+  "meeting_date": "2026-10-14",
+  "deltas": [
+    {
+      "seq": 1, "event_id": "00000000-0000-4000-8000-0000000000a1", "captured_at": "2026-10-14T19:00:00+08:00",
+      "changes": [
+        { "runner_id": "X_T001", "race_no": 2, "horse_no": 5, "horse_name": "TEST DECLARED FIVE", "status": "Declared", "pool": "WIN", "prev_odds": 6.0, "new_odds": 5.0, "captured_at": "2026-10-14T19:00:00+08:00", "seq": 1, "sample_interval_s": 3 },
+        { "runner_id": "X_T099", "race_no": 2, "horse_no": 5, "horse_name": "TEST STANDBY FIVE", "status": "Standby", "pool": "WIN", "prev_odds": 99.0, "new_odds": 50.0, "captured_at": "2026-10-14T19:00:00+08:00", "seq": 1, "sample_interval_s": 3 },
+        { "runner_id": "X_T001", "race_no": 2, "horse_no": 5, "horse_name": "TEST DECLARED FIVE", "status": "Declared", "pool": "PLA", "prev_odds": 2.0, "new_odds": 1.9, "captured_at": "2026-10-14T19:00:00+08:00", "seq": 1, "sample_interval_s": 3 }
+      ]
+    },
+    {
+      "seq": 2, "event_id": "00000000-0000-4000-8000-0000000000a2", "captured_at": "2026-10-14T19:00:03+08:00",
+      "changes": [
+        { "runner_id": "X_T099", "race_no": 2, "horse_no": 5, "horse_name": "TEST STANDBY FIVE", "status": "Standby", "pool": "WIN", "prev_odds": null, "new_odds": 60.0, "captured_at": "2026-10-14T19:00:03+08:00", "seq": 2, "sample_interval_s": 3 },
+        { "runner_id": "X_T001", "race_no": 2, "horse_no": 5, "horse_name": "TEST DECLARED FIVE", "status": "Declared", "pool": "WIN", "prev_odds": null, "new_odds": 4.0, "captured_at": "2026-10-14T19:00:03+08:00", "seq": 2, "sample_interval_s": 3 }
+      ]
+    }
+  ]
+}
