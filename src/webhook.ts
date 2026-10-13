@@ -1,3 +1,4 @@
+import { normStatus } from "./push11";
 import { sha256Hex, verifySignature } from "./crypto";
 import { dedupeKey, maxSnapshotTime, parseEnvelope } from "./envelope";
 import type { Env } from "./env";
@@ -97,6 +98,10 @@ export async function handleWebhook(request: Request, env: Env, ctx: ExecutionCo
             name_zh: runner.horse_name_ch ?? null,
             name_en: runner.horse_name ?? null,
             bet_type,
+            runner_id: typeof runner.runner_id === "string" && runner.runner_id ? runner.runner_id : null,
+            horse_name: runner.horse_name ?? null,
+            status: normStatus(runner.status),
+            pool: bet_type,
             prev_odds: null,
             new_odds: odds,
             odds_basis: "total_return",

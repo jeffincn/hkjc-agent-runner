@@ -27,6 +27,8 @@ export interface PushRunner {
   horse_name: string | null;
   /** Additive 1.1 field; omitted by older / 1.0 producers. */
   horse_name_ch?: string | null;
+  /** Stable HKJC horse.code (hkjc-worker 740b52d3+); omitted by older producers. */
+  runner_id?: string | null;
   win_odds: number | null;
   place_odds: number | null;
   status: string | null;

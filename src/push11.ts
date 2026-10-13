@@ -37,7 +37,11 @@ export const CHANGE_FIELDS = {
   runner_no: ["runner_no", "horse_no"],
   name_zh: ["horse_name_ch", "name_zh", "name_ch", "horse_name_zh"],
   name_en: ["horse_name_en", "name_en", "horse_name"],
-  bet_type: ["bet_type"],
+  bet_type: ["bet_type", "pool"],
+  runner_id: ["runner_id"],
+  horse_name: ["horse_name"],
+  status: ["status"],
+  pool: ["pool"],
   prev_odds: ["prev_odds"],
   new_odds: ["new_odds"],
   odds_basis: ["odds_basis"],
@@ -62,6 +66,14 @@ export interface OddsChange {
   name_zh: string | null;
   name_en: string | null;
   bet_type: "WIN" | "PLA";
+  /** Stable runner identity (HKJC horse.code); null on pre-740b52d3 payloads. */
+  runner_id: string | null;
+  /** Raw upstream horse_name (also used as a name_en fallback). */
+  horse_name: string | null;
+  /** Declared | Standby (null when absent). */
+  status: string | null;
+  /** Raw upstream pool (WIN | PLA) when sent. */
+  pool: string | null;
   prev_odds: number | null;
   new_odds: number | null;
   /** Upstream string; HKJC const is treated as total_return by validation. */
@@ -123,6 +135,15 @@ const numOrNull = (v: unknown): number | null | undefined => {
   return num(v);
 };
 
+/** Canonicalise runner status: "Declared" | "Standby" (case-insensitive); other strings kept as-is. */
+export function normStatus(v: unknown): string | null {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s) return null;
+  const l = s.toLowerCase();
+  return l === "declared" ? "Declared" : l === "standby" ? "Standby" : s;
+}
+export const isStandby = (status: string | null | undefined) => (status ?? "").toLowerCase() === "standby";
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isSchema11(schema: string): boolean {
@@ -150,6 +171,10 @@ export function mapChange(raw: unknown): OddsChange | null {
     name_zh: str(pickKey(o, CHANGE_FIELDS.name_zh)),
     name_en: str(pickKey(o, CHANGE_FIELDS.name_en)),
     bet_type,
+    runner_id: str(pickKey(o, CHANGE_FIELDS.runner_id)),
+    horse_name: str(pickKey(o, CHANGE_FIELDS.horse_name)),
+    status: normStatus(pickKey(o, CHANGE_FIELDS.status)),
+    pool: str(pickKey(o, CHANGE_FIELDS.pool))?.toUpperCase() ?? null,
     prev_odds: prev === undefined ? null : prev,
     new_odds: next === undefined ? null : next,
     odds_basis: str(pickKey(o, CHANGE_FIELDS.odds_basis)),

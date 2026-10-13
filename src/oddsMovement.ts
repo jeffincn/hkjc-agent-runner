@@ -26,6 +26,8 @@ export interface LedgerRow {
   name_zh: string | null;
   name_en: string | null;
   bet_type: string;
+  runner_id?: string | null;
+  status?: string | null;
   prev_odds: number | null;
   new_odds: number | null;
   captured_at: string | null;
@@ -62,6 +64,8 @@ export interface MinuteBucket {
 
 export interface Series {
   race_no: number;
+  /** Stable runner identity; null for legacy rows keyed only by runner_no. */
+  runner_id: string | null;
   runner_no: number;
   name_zh: string | null;
   name_en: string | null;
@@ -103,16 +107,24 @@ export function changeFlags(prev: number, next: number): MoveFlag[] {
  * Rows must be in replay order (seq, then id). Rows with unchanged or missing odds are not
  * counted as changes; prev_odds is filled from the trajectory when absent (1.0 snapshots).
  */
+/** Series identity: runner_id when present, else runner_no (legacy 1.0/1.1 payloads). */
+export function runnerKey(r: { runner_id?: string | null; runner_no: number }): string {
+  return r.runner_id ? `id:${r.runner_id}` : `no:${r.runner_no}`;
+}
+export const isStandbyRow = (r: { status?: string | null }) => (r.status ?? "").toLowerCase() === "standby";
+
 export function computeOddsMovement(rows: LedgerRow[], opts: { excludePostRace?: boolean } = {}): Series[] {
   const map = new Map<string, Series & { _last: number | null; _first: number | null }>();
   for (const r of rows) {
     const post = r.post_race === 1 || r.post_race === true;
     if (opts.excludePostRace && post) continue;
-    const k = `${r.race_no}|${r.runner_no}|${r.bet_type}`;
+    // Standby runners are not in the field: never counted in density / movement stats.
+    if (isStandbyRow(r)) continue;
+    const k = `${r.race_no}|${runnerKey(r)}|${r.bet_type}`;
     let s = map.get(k);
     if (!s) {
       s = {
-        race_no: r.race_no, runner_no: r.runner_no, name_zh: r.name_zh, name_en: r.name_en, bet_type: r.bet_type,
+        race_no: r.race_no, runner_id: r.runner_id ?? null, runner_no: r.runner_no, name_zh: r.name_zh, name_en: r.name_en, bet_type: r.bet_type,
         first_odds: null, last_odds: null, change_count: 0, active_minutes: 0, max_changes_per_minute: 0,
         cum_odds_drift: 0, cum_pct_drift: 0, cum_implied_p_drift: 0, jumps: 0, drops: 0, bursts: 0,
         minutes: [], changes: [], _last: null, _first: null,
@@ -175,10 +187,11 @@ export function computeOddsMovement(rows: LedgerRow[], opts: { excludePostRace?:
 
 export interface MovementQuery { meeting_date: string; race_no?: number; horse?: string; bet_type?: string; exclude_post_race?: boolean; include_changes?: boolean }
 
-/** horse matches a runner number ("7") or a case-insensitive substring of name_zh / name_en. */
-export function matchHorse(s: { runner_no: number; name_zh: string | null; name_en: string | null }, horse?: string): boolean {
+/** horse matches a runner_id (exact, case-insensitive), a runner number ("7") or a case-insensitive substring of name_zh / name_en. */
+export function matchHorse(s: { runner_id?: string | null; runner_no: number; name_zh: string | null; name_en: string | null }, horse?: string): boolean {
   if (!horse) return true;
   const h = horse.trim().toLowerCase();
+  if (s.runner_id && s.runner_id.toLowerCase() === h) return true;
   if (/^\d+$/.test(h)) return s.runner_no === Number(h);
   return (s.name_zh ?? "").toLowerCase().includes(h) || (s.name_en ?? "").toLowerCase().includes(h);
 }
@@ -189,7 +202,7 @@ export async function loadOddsMovement(db: D1Database, q: MovementQuery) {
   if (q.race_no !== undefined) { where.push("race_no = ?"); binds.push(q.race_no); }
   if (q.bet_type) { where.push("bet_type = ?"); binds.push(q.bet_type); }
   const res = await db.prepare(
-    `SELECT id, seq, race_no, runner_no, name_zh, name_en, bet_type, prev_odds, new_odds, captured_at, received_at_hkt, post_race
+    `SELECT id, seq, race_no, runner_no, runner_id, status, name_zh, name_en, bet_type, prev_odds, new_odds, captured_at, received_at_hkt, post_race
      FROM odds_ledger WHERE ${where.join(" AND ")} ORDER BY seq IS NULL, seq, id LIMIT ?`,
   ).bind(...binds, MOVEMENT_SCAN_CAP + 1).all<LedgerRow>();
   const all = res.results ?? [];
@@ -202,6 +215,7 @@ export async function loadOddsMovement(db: D1Database, q: MovementQuery) {
       sample_interval_seconds: SAMPLE_INTERVAL_SECONDS, jump_pct: JUMP_PCT, drop_pct: DROP_PCT,
       prob_shift: PROB_SHIFT, burst_changes_per_minute: BURST_CHANGES_PER_MINUTE,
     },
+    keyed_by: "runner_id (fallback runner_no for legacy rows); Standby rows excluded",
     series_count: series.length,
     scan_truncated: all.length > MOVEMENT_SCAN_CAP,
     series,

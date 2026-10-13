@@ -49,6 +49,10 @@ export interface LedgerEntry {
   name_zh: string | null;
   name_en: string | null;
   bet_type: "WIN" | "PLA";
+  runner_id?: string | null;
+  horse_name?: string | null;
+  status?: string | null;
+  pool?: string | null;
   prev_odds: number | null;
   new_odds: number | null;
   odds_basis: string | null;
@@ -251,11 +255,12 @@ function qualityStatements(db: D1Database, ev: NewInbox, q: InboundQuality, id: 
       out.push(
         db.prepare(
           `INSERT INTO odds_ledger (inbox_id, event_id, seq, schema_version, meeting_date, venue, race_no, runner_no, name_zh, name_en,
-             bet_type, prev_odds, new_odds, odds_basis, captured_at, received_at_hkt, post_race, quality_flags)
-           SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${IF_NEW}`,
+             bet_type, prev_odds, new_odds, odds_basis, captured_at, received_at_hkt, post_race, quality_flags, runner_id, horse_name, status, pool)
+           SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${IF_NEW}`,
         ).bind(
           id, q.event_id, q.seq, ev.schema_version, md, ev.venue, l.race_no, l.runner_no, l.name_zh, l.name_en,
-          l.bet_type, l.prev_odds, l.new_odds, l.odds_basis, q.captured_at, q.received_at_hkt, l.post_race ? 1 : 0, JSON.stringify(q.flags), id,
+          l.bet_type, l.prev_odds, l.new_odds, l.odds_basis, q.captured_at, q.received_at_hkt, l.post_race ? 1 : 0, JSON.stringify(q.flags),
+          l.runner_id ?? null, l.horse_name ?? null, l.status ?? null, l.pool ?? null, id,
         ),
       );
     }
