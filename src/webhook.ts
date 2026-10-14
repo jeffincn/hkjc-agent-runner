@@ -3,10 +3,10 @@ import { sha256Hex, verifySignature } from "./crypto";
 import { dedupeKey, maxSnapshotTime, parseEnvelope } from "./envelope";
 import type { Env } from "./env";
 import { envInt, nowMs } from "./env";
-import { fanOutAccepted } from "./forward";
 import { assess, PRE_RACE_INPUT_EVENTS } from "./quality";
 import type { LedgerEntry } from "./store";
 import { dispatchByInbox } from "./outbox";
+import { fanoutToAgents } from "./fanout";
 import { routeEvent } from "./router";
 import { persistInbound, recordRejection } from "./store";
 
@@ -149,16 +149,20 @@ export async function handleWebhook(request: Request, env: Env, ctx: ExecutionCo
   });
 
   if (!duplicate) {
-    // Queue dispatch + downstream fan-out run after accept; 202 path unchanged.
     ctx.waitUntil(dispatchByInbox(env, id).then(() => undefined, () => undefined));
+    // Fan-out to downstream agent subscribers. Best-effort and fully isolated:
+    // it never blocks the 202 response, never touches the inbox → queue path,
+    // and never throws (fanoutToAgents swallows per-subscriber errors).
     ctx.waitUntil(
-      fanOutAccepted(env, {
-        inbox_id: id,
-        raw_body: text,
-        event_type: ev.event,
-        meeting_date: ev.meeting_date,
-        quality_flags: qa.flags,
-      }).then(() => undefined, () => undefined),
+      fanoutToAgents(env, {
+        eventType: ev.event,
+        rawBody: text,
+        qualityFlags: qa.flags,
+        meetingDate: ev.meeting_date,
+      }).then(
+        () => undefined,
+        () => undefined,
+      ),
     );
   }
   return json(202, { received: true }, {
