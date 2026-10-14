@@ -22,11 +22,17 @@ export default {
     const run = /^\/runs\/([^/]+)$/.exec(url.pathname);
     if (request.method === "GET" && run) return handleGetRun(request, env, decodeURIComponent(run[1]));
     // Downstream agent subscriber admin (Bearer RUNNER_API_TOKEN).
-    if (url.pathname === "/v1/admin/agent-subscribers") {
+    // /v1/admin/subscribers is a backward-compatible alias for /v1/admin/agent-subscribers.
+    if (
+      url.pathname === "/v1/admin/agent-subscribers" ||
+      url.pathname === "/v1/admin/subscribers"
+    ) {
       if (request.method === "GET") return handleListAgentSubscribers(request, env);
       if (request.method === "POST") return handleCreateAgentSubscriber(request, env);
     }
-    const sub = /^\/v1\/admin\/agent-subscribers\/(\d+)$/.exec(url.pathname);
+    const sub =
+      /^\/v1\/admin\/agent-subscribers\/(\d+)$/.exec(url.pathname) ??
+      /^\/v1\/admin\/subscribers\/(\d+)$/.exec(url.pathname);
     if (sub) {
       const id = Number(sub[1]);
       if (request.method === "GET") return handleGetAgentSubscriber(request, env, id);
