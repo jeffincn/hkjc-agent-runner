@@ -3,6 +3,7 @@ import { sha256Hex, verifySignature } from "./crypto";
 import { dedupeKey, maxSnapshotTime, parseEnvelope } from "./envelope";
 import type { Env } from "./env";
 import { envInt, nowMs } from "./env";
+import { fanOutAccepted } from "./forward";
 import { assess, PRE_RACE_INPUT_EVENTS } from "./quality";
 import type { LedgerEntry } from "./store";
 import { dispatchByInbox } from "./outbox";
@@ -148,7 +149,17 @@ export async function handleWebhook(request: Request, env: Env, ctx: ExecutionCo
   });
 
   if (!duplicate) {
+    // Queue dispatch + downstream fan-out run after accept; 202 path unchanged.
     ctx.waitUntil(dispatchByInbox(env, id).then(() => undefined, () => undefined));
+    ctx.waitUntil(
+      fanOutAccepted(env, {
+        inbox_id: id,
+        raw_body: text,
+        event_type: ev.event,
+        meeting_date: ev.meeting_date,
+        quality_flags: qa.flags,
+      }).then(() => undefined, () => undefined),
+    );
   }
   return json(202, { received: true }, {
     "X-Inbox-Id": id,

@@ -1,6 +1,7 @@
 import { handleBatch } from "./consumer";
 import type { Env, QueueMessageBody } from "./env";
-import { handleGetRun, handleHealth } from "./http";
+import { flushPendingForwards } from "./forward";
+import { handleAdminSubscribers, handleGetRun, handleHealth } from "./http";
 import { runDispatcher } from "./outbox";
 import { handleWebhook } from "./webhook";
 import { handleMcp } from "./mcp";
@@ -8,10 +9,14 @@ import { handleMcp } from "./mcp";
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/health") return handleHealth(env);
-    if (url.pathname === "/mcp") return handleMcp(request, env);
-    if (request.method === "POST" && url.pathname === "/webhook") return handleWebhook(request, env, ctx);
-    const run = /^\/runs\/([^/]+)$/.exec(url.pathname);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    if (request.method === "GET" && path === "/health") return handleHealth(env);
+    if (path === "/mcp") return handleMcp(request, env);
+    if (request.method === "POST" && path === "/webhook") return handleWebhook(request, env, ctx);
+    if (path === "/v1/admin/subscribers") return handleAdminSubscribers(request, env);
+    const subMatch = /^\/v1\/admin\/subscribers\/(\d+)$/.exec(path);
+    if (subMatch) return handleAdminSubscribers(request, env, subMatch[1]);
+    const run = /^\/runs\/([^/]+)$/.exec(path);
     if (request.method === "GET" && run) return handleGetRun(request, env, decodeURIComponent(run[1]));
     return new Response(JSON.stringify({ error: "not found" }), {
       status: 404,
@@ -24,6 +29,11 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runDispatcher(env).then(() => undefined));
+    ctx.waitUntil(
+      Promise.all([
+        runDispatcher(env).then(() => undefined),
+        flushPendingForwards(env).then(() => undefined),
+      ]),
+    );
   },
 };
