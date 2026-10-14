@@ -13,7 +13,24 @@ async function freshDb(): Promise<D1Database> {
     d1Databases: ["DB"],
   });
   const db = await mf.getD1Database("DB");
-  for (const table of ["odds_ledger", "analysis_validation", "seq_gaps", "stream_state", "race_schedule", "run_steps", "analysis_runs", "race_opinions", "odds_latest", "outbox", "inbox_events", "webhook_rejections", "runner_meta", "agent_subscribers"]) {
+  for (const table of [
+    "odds_ledger",
+    "analysis_validation",
+    "seq_gaps",
+    "stream_state",
+    "race_schedule",
+    "run_steps",
+    "analysis_runs",
+    "race_opinions",
+    "odds_latest",
+    "outbox",
+    "inbox_events",
+    "webhook_rejections",
+    "runner_meta",
+    "agent_pending_forwards",
+    "agent_subscribers",
+    "agent_subscribers_new",
+  ]) {
     await db.exec(`DROP TABLE IF EXISTS ${table}`);
   }
   const dir = new URL("../migrations/", import.meta.url);
