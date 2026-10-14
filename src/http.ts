@@ -2,12 +2,13 @@ import type { Env } from "./env";
 import { getMetaMap } from "./store";
 import { allRoles } from "./roles";
 import {
-  createSubscriber,
-  deleteSubscriber,
-  listSubscribers,
-  toPublicSubscriber,
-  updateSubscriber,
-} from "./subscribers";
+  createAgentSubscriber,
+  deleteAgentSubscriber,
+  getAgentSubscriber,
+  listAgentSubscribers,
+  toPublicAgentSubscriber,
+  updateAgentSubscriber,
+} from "./agentSubscribers";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -68,81 +69,89 @@ export async function handleGetRun(request: Request, env: Env, runId: string): P
   });
 }
 
-/**
- * Admin CRUD mirroring hkjc-worker `/v1/admin/subscribers`.
- * Auth: same Bearer RUNNER_API_TOKEN as GET /runs/:id.
- */
-export async function handleAdminSubscribers(request: Request, env: Env, idParam?: string): Promise<Response> {
-  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
-  if (denied) return denied;
-
-  if (idParam === undefined) {
-    if (request.method === "GET") {
-      const rows = await listSubscribers(env);
-      return json(200, { subscribers: rows.map(toPublicSubscriber) });
-    }
-    if (request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as {
-        url?: string;
-        secret?: string | null;
-        enabled?: boolean;
-        event_filter?: string[] | string;
-        active_window?: string;
-        window_before_sec?: number;
-        quiet_start?: string | null;
-        quiet_end?: string | null;
-      } | null;
-      if (!body || typeof body.url !== "string") return json(400, { error: "url is required" });
-      try {
-        const row = await createSubscriber(env, {
-          url: body.url,
-          secret: body.secret,
-          enabled: body.enabled,
-          event_filter: body.event_filter,
-          active_window: body.active_window,
-          window_before_sec: body.window_before_sec,
-          quiet_start: body.quiet_start,
-          quiet_end: body.quiet_end,
-        });
-        return json(201, { subscriber: toPublicSubscriber(row) });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("UNIQUE") || msg.toLowerCase().includes("unique")) {
-          return json(409, { error: "subscriber url already exists" });
-        }
-        return json(400, { error: msg });
-      }
-    }
-    return json(405, { error: "Method not allowed" });
-  }
-
-  const id = Number(idParam);
-  if (!Number.isFinite(id) || id <= 0) return json(400, { error: "invalid subscriber id" });
-
-  if (request.method === "PATCH") {
-    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== "object") return json(400, { error: "JSON body required" });
-    try {
-      const row = await updateSubscriber(env, id, body);
-      if (!row) return json(404, { error: "subscriber not found" });
-      return json(200, { subscriber: toPublicSubscriber(row) });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("UNIQUE") || msg.toLowerCase().includes("unique")) {
-        return json(409, { error: "subscriber url already exists" });
-      }
-      return json(400, { error: msg });
-    }
-  }
-  if (request.method === "DELETE") {
-    const ok = await deleteSubscriber(env, id);
-    if (!ok) return json(404, { error: "subscriber not found" });
-    return json(200, { deleted: true, id });
-  }
-  return json(405, { error: "Method not allowed" });
-}
-
 function parse(v: unknown): unknown {
   if (typeof v !== "string") return null;
   try { return JSON.parse(v); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Downstream agent subscribers (multi-subscriber fan-out hub).
+// Auth: same Bearer scheme as handleGetRun (RUNNER_API_TOKEN).
+// ---------------------------------------------------------------------------
+
+type AgentSubscriberBody = {
+  url?: string;
+  secret?: string | null;
+  enabled?: boolean;
+  event_filter?: string[] | null;
+  active_window?: string;
+  window_before_sec?: number;
+  quiet_start?: string | null;
+  quiet_end?: string | null;
+};
+
+function isUniqueError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("UNIQUE") || msg.toLowerCase().includes("unique");
+}
+
+async function readJsonBody(request: Request): Promise<AgentSubscriberBody | null> {
+  try {
+    const v: unknown = await request.json();
+    return v && typeof v === "object" ? (v as AgentSubscriberBody) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function handleListAgentSubscribers(request: Request, env: Env): Promise<Response> {
+  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
+  if (denied) return denied;
+  const rows = await listAgentSubscribers(env);
+  return json(200, { subscribers: rows.map(toPublicAgentSubscriber) });
+}
+
+export async function handleCreateAgentSubscriber(request: Request, env: Env): Promise<Response> {
+  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
+  if (denied) return denied;
+  const body = await readJsonBody(request);
+  if (!body || typeof body.url !== "string") return json(400, { error: "url is required" });
+  try {
+    const row = await createAgentSubscriber(env, { ...body, url: body.url });
+    return json(201, { subscriber: toPublicAgentSubscriber(row) });
+  } catch (err) {
+    if (isUniqueError(err)) return json(409, { error: "subscriber url already exists" });
+    return json(400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function handleGetAgentSubscriber(request: Request, env: Env, id: number): Promise<Response> {
+  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
+  if (denied) return denied;
+  const row = await getAgentSubscriber(env, id);
+  if (!row) return json(404, { error: "not found" });
+  return json(200, { subscriber: toPublicAgentSubscriber(row) });
+}
+
+export async function handleUpdateAgentSubscriber(request: Request, env: Env, id: number): Promise<Response> {
+  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
+  if (denied) return denied;
+  const body = await readJsonBody(request);
+  if (!body) return json(400, { error: "JSON body required" });
+  try {
+    const row = await updateAgentSubscriber(env, id, body);
+    if (!row) return json(404, { error: "not found" });
+    return json(200, { subscriber: toPublicAgentSubscriber(row) });
+  } catch (err) {
+    if (isUniqueError(err)) return json(409, { error: "subscriber url already exists" });
+    return json(400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function handleDeleteAgentSubscriber(request: Request, env: Env, id: number): Promise<Response> {
+  const denied = bearerOk(request, env.RUNNER_API_TOKEN);
+  if (denied) return denied;
+  const ok = await deleteAgentSubscriber(env, id);
+  if (!ok) return json(404, { error: "not found" });
+  return json(200, { deleted: true, id });
 }
