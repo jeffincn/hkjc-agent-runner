@@ -19,6 +19,12 @@ export interface Env {
   ODDS_COALESCE_SECONDS?: string;
   MAX_ROUNDS?: string;
   MAX_PROCESS_ATTEMPTS?: string;
+  /** Per-subscriber forward circuit breaker (mirrors hkjc-worker). */
+  CIRCUIT_BREAKER_THRESHOLD?: string;
+  CIRCUIT_BREAKER_429_THRESHOLD?: string;
+  CIRCUIT_HALF_OPEN_MS?: string;
+  /** Max forward POSTs per subscriber per second; excess delayed, never dropped. */
+  FORWARD_RATE_PER_SUB_PER_SEC?: string;
 }
 
 export function envInt(v: string | undefined, def: number, min: number, max: number): number {
