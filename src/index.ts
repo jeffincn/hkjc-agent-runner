@@ -1,3 +1,4 @@
+import { collectWorker } from "./collector";
 import { handleBatch } from "./consumer";
 import type { Env, QueueMessageBody } from "./env";
 import {
@@ -51,13 +52,10 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(
-      Promise.all([
-        runDispatcher(env).then(() => undefined),
-        // Agent fan-out pending queue (issue #10): retry failed / deferred
-        // subscriber deliveries ordered by seq.
-        flushPendingForwards(env).then(() => undefined),
-      ]),
-    );
+    // Independent promises: outbox recovery, fan-out pending flush (issue #10),
+    // and opt-in pull-only collection must not block each other.
+    ctx.waitUntil(runDispatcher(env).then(() => undefined));
+    ctx.waitUntil(flushPendingForwards(env).then(() => undefined));
+    ctx.waitUntil(collectWorker(env).then(() => undefined));
   },
 };
