@@ -24,10 +24,12 @@ async function freshDb(): Promise<D1Database> {
     "race_opinions",
     "odds_latest",
     "outbox",
+    // Fan-out tables reference inbox_events / agent_subscribers — drop first.
+    "agent_delivery_attempts",
+    "agent_pending_forwards",
     "inbox_events",
     "webhook_rejections",
     "runner_meta",
-    "agent_pending_forwards",
     "agent_subscribers",
     "agent_subscribers_new",
   ]) {

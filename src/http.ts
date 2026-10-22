@@ -33,6 +33,15 @@ export async function healthBody(env: Env): Promise<Record<string, unknown>> {
   for (const row of counts.results ?? []) inbox[row.status] = row.n;
   const pending = await env.DB.prepare(`SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending'`).first<{ n: number }>();
   const rejected = await env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_rejections`).first<{ n: number }>();
+  let fanoutPending = 0;
+  try {
+    const fp = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM agent_pending_forwards WHERE next_attempt_at IS NOT NULL`,
+    ).first<{ n: number }>();
+    fanoutPending = fp?.n ?? 0;
+  } catch {
+    // Table may be absent on pre-0006 deployments; health must still work.
+  }
   const meta = await getMetaMap(env.DB);
   const m = (k: string) => meta[k]?.value ?? null;
   return {
@@ -44,6 +53,7 @@ export async function healthBody(env: Env): Promise<Record<string, unknown>> {
     roles_loaded: allRoles().length,
     inbox,
     outbox_pending: pending?.n ?? 0,
+    fanout_pending: fanoutPending,
     rejections: rejected?.n ?? 0,
     last_queue_send_ok: m("last_queue_send_ok"),
     last_queue_send_error: m("last_queue_send_error"),

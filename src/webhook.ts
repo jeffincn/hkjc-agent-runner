@@ -6,7 +6,7 @@ import { envInt, nowMs } from "./env";
 import { assess, PRE_RACE_INPUT_EVENTS } from "./quality";
 import type { LedgerEntry } from "./store";
 import { dispatchByInbox } from "./outbox";
-import { fanoutToAgents } from "./fanout";
+import { fanoutToAgents, stageFanoutPending } from "./fanout";
 import { routeEvent } from "./router";
 import { persistInbound, recordRejection } from "./store";
 
@@ -150,16 +150,24 @@ export async function handleWebhook(request: Request, env: Env, ctx: ExecutionCo
 
   if (!duplicate) {
     ctx.waitUntil(dispatchByInbox(env, id).then(() => undefined, () => undefined));
-    // Fan-out to downstream agent subscribers. Best-effort and fully isolated:
-    // it never blocks the 202 response, never touches the inbox → queue path,
-    // and never throws (fanoutToAgents swallows per-subscriber errors).
+    // Fan-out: stage pending rows synchronously so a shed waitUntil cannot lose
+    // the delivery; then flush in waitUntil (cron also flushes leftovers).
+    // Staging/flush never throws into the 202 path and never touches inbox → queue.
+    const fanoutInput = {
+      eventType: ev.event,
+      rawBody: text,
+      qualityFlags: qa.flags,
+      meetingDate: ev.meeting_date,
+      inboxId: id,
+      seq,
+    };
+    try {
+      await stageFanoutPending(env, fanoutInput);
+    } catch {
+      // Staging errors must not fail the webhook accept.
+    }
     ctx.waitUntil(
-      fanoutToAgents(env, {
-        eventType: ev.event,
-        rawBody: text,
-        qualityFlags: qa.flags,
-        meetingDate: ev.meeting_date,
-      }).then(
+      fanoutToAgents(env, fanoutInput).then(
         () => undefined,
         () => undefined,
       ),

@@ -15,7 +15,16 @@ import {
   recordAgentDeliveryFailure,
   recordAgentDeliverySuccess,
 } from "../src/agentCircuit";
-import { fanoutToAgents, hktDate, inQuietHours, windowActive } from "../src/fanout";
+import {
+  fanoutToAgents,
+  flushPendingForwards,
+  hktDate,
+  inQuietHours,
+  nextBackoffMinutes,
+  stageFanoutPending,
+  windowActive,
+} from "../src/fanout";
+import { nowIso } from "../src/env";
 import {
   handleCreateAgentSubscriber,
   handleDeleteAgentSubscriber,
@@ -239,6 +248,46 @@ describe("fanoutToAgents", () => {
 
   const okResp = () => new Response("{}", { status: 200 });
 
+  async function seedInbox(
+    db: D1Database,
+    opts: { id: string; rawBody: string; eventType?: string; meetingDate?: string; seq?: number | null },
+  ): Promise<void> {
+    const ts = nowIso();
+    await db
+      .prepare(
+        `INSERT INTO inbox_events
+          (id, dedupe_key, dedupe_source, event_type, schema_version, meeting_date, venue,
+           race_nos, snapshot_time, sent_at, raw_body, received_at, signature_status, status, workflow, updated_at, seq)
+         VALUES (?, ?, 'test', ?, 'hkjc-push/1.1', ?, 'HV', '[]', NULL, NULL, ?, ?, 'valid', 'received', 'record_only', ?, ?)`,
+      )
+      .bind(
+        opts.id,
+        `dk-${opts.id}`,
+        opts.eventType ?? "result",
+        opts.meetingDate ?? "2026-10-07",
+        opts.rawBody,
+        ts,
+        ts,
+        opts.seq ?? null,
+      )
+      .run();
+  }
+
+  async function runFanout(
+    env: ReturnType<typeof testEnv>,
+    input: {
+      eventType: string;
+      rawBody: string;
+      qualityFlags: string[];
+      meetingDate: string | null;
+      inboxId: string;
+      seq: number | null;
+    },
+  ) {
+    await stageFanoutPending(env, input);
+    return fanoutToAgents(env, input);
+  }
+
   it("forwards to matching subscribers only, with quality flags header", async () => {
     const db = await freshDb();
     const env = testEnv(db, fakeQueue());
@@ -246,11 +295,14 @@ describe("fanoutToAgents", () => {
     await createAgentSubscriber(env, { url: "https://results.example/hook", event_filter: ["result"] });
     const calls = stubFetch(() => okResp());
 
-    const r1 = await fanoutToAgents(env, {
+    await seedInbox(db, { id: "inbox-odds", rawBody: '{"event":"odds_delta"}', eventType: "odds_delta", seq: 10 });
+    const r1 = await runFanout(env, {
       eventType: "odds_delta",
       rawBody: '{"event":"odds_delta"}',
       qualityFlags: ["late"],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-odds",
+      seq: 10,
     });
     expect(r1.attempted).toBe(1);
     expect(r1.delivered).toBe(1);
@@ -260,11 +312,14 @@ describe("fanoutToAgents", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["X-Quality-Flags"]).toBe("late");
 
-    const r2 = await fanoutToAgents(env, {
+    await seedInbox(db, { id: "inbox-result", rawBody: '{"event":"result"}', eventType: "result", seq: 11 });
+    const r2 = await runFanout(env, {
       eventType: "result",
       rawBody: '{"event":"result"}',
       qualityFlags: [],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-result",
+      seq: 11,
     });
     expect(r2.delivered).toBe(2);
   });
@@ -274,11 +329,14 @@ describe("fanoutToAgents", () => {
     const env = testEnv(db, fakeQueue());
     await createAgentSubscriber(env, { url: "https://signed.example/hook", secret: "shh" });
     const calls = stubFetch(() => okResp());
-    await fanoutToAgents(env, {
+    await seedInbox(db, { id: "inbox-signed", rawBody: '{"event":"result"}' });
+    await runFanout(env, {
       eventType: "result",
       rawBody: '{"event":"result"}',
       qualityFlags: [],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-signed",
+      seq: null,
     });
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["X-Signature"]).toMatch(/^[0-9a-f]{64}$/);
@@ -297,21 +355,27 @@ describe("fanoutToAgents", () => {
       active_window: "raceday",
     });
     stubFetch(() => okResp());
+    await seedInbox(db, { id: "inbox-day", rawBody: "{}" });
     // T0 = 12:00 HKT: not quiet, meeting is today → both deliver
-    const r1 = await fanoutToAgents(env, {
+    const r1 = await runFanout(env, {
       eventType: "result",
       rawBody: "{}",
       qualityFlags: [],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-day",
+      seq: null,
     });
     expect(r1.delivered).toBe(2);
     // 02:00 HKT: quiet for the first; meeting date is yesterday for raceday check
     setClockForTest(() => Date.parse("2026-10-07T02:00:00+08:00"));
-    const r2 = await fanoutToAgents(env, {
+    await seedInbox(db, { id: "inbox-night", rawBody: "{}", meetingDate: "2026-10-06" });
+    const r2 = await runFanout(env, {
       eventType: "result",
       rawBody: "{}",
       qualityFlags: [],
       meetingDate: "2026-10-06",
+      inboxId: "inbox-night",
+      seq: null,
     });
     expect(r2.delivered).toBe(0);
     expect(r2.skipped.map((s) => s.reason).sort()).toEqual(["active_window", "quiet_hours"]);
@@ -326,11 +390,14 @@ describe("fanoutToAgents", () => {
       if (url.includes("bad.example")) throw new Error("connection reset");
       return okResp();
     });
-    const r = await fanoutToAgents(env, {
+    await seedInbox(db, { id: "inbox-iso", rawBody: "{}" });
+    const r = await runFanout(env, {
       eventType: "result",
       rawBody: "{}",
       qualityFlags: [],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-iso",
+      seq: null,
     });
     expect(r.attempted).toBe(2);
     expect(r.delivered).toBe(1);
@@ -346,13 +413,117 @@ describe("fanoutToAgents", () => {
   it("does nothing when no subscribers exist", async () => {
     const db = await freshDb();
     const env = testEnv(db, fakeQueue());
-    const r = await fanoutToAgents(env, {
+    const r = await runFanout(env, {
       eventType: "result",
       rawBody: "{}",
       qualityFlags: [],
       meetingDate: "2026-10-07",
+      inboxId: "inbox-none",
+      seq: null,
     });
-    expect(r).toEqual({ attempted: 0, delivered: 0, failed: 0, skipped: [] });
+    expect(r).toEqual({ attempted: 0, delivered: 0, failed: 0, deferred: 0, skipped: [] });
+  });
+
+  it("stages pending synchronously and retries failed delivery with backoff", async () => {
+    const db = await freshDb();
+    const env = testEnv(db, fakeQueue(), { CIRCUIT_BREAKER_THRESHOLD: "100" });
+    await createAgentSubscriber(env, { url: "https://flaky.example/hook" });
+    let hits = 0;
+    stubFetch(() => {
+      hits += 1;
+      if (hits === 1) return new Response("nope", { status: 500 });
+      return okResp();
+    });
+    await seedInbox(db, { id: "inbox-retry", rawBody: '{"event":"odds_delta"}', eventType: "odds_delta", seq: 42 });
+
+    const input = {
+      eventType: "odds_delta",
+      rawBody: '{"event":"odds_delta"}',
+      qualityFlags: ["gap"],
+      meetingDate: "2026-10-07",
+      inboxId: "inbox-retry",
+      seq: 42,
+    };
+    const staged = await stageFanoutPending(env, input);
+    expect(staged).toBe(1);
+    const pendingBefore = await db
+      .prepare(`SELECT retry_count, next_attempt_at, last_error FROM agent_pending_forwards WHERE inbox_id = ?`)
+      .bind("inbox-retry")
+      .first<{ retry_count: number; next_attempt_at: string | null; last_error: string | null }>();
+    expect(pendingBefore).toBeTruthy();
+
+    const first = await fanoutToAgents(env, input);
+    expect(first.failed).toBe(1);
+    expect(first.delivered).toBe(0);
+
+    const pendingAfter = await db
+      .prepare(`SELECT retry_count, next_attempt_at, last_error FROM agent_pending_forwards WHERE inbox_id = ?`)
+      .bind("inbox-retry")
+      .first<{ retry_count: number; next_attempt_at: string | null; last_error: string | null }>();
+    expect(pendingAfter?.retry_count).toBe(1);
+    expect(pendingAfter?.next_attempt_at).toBeTruthy();
+    expect(nextBackoffMinutes(1)).toBe(5);
+
+    const attempts = await db
+      .prepare(`SELECT outcome, attempt, http_status, latency_ms, seq FROM agent_delivery_attempts WHERE inbox_id = ? ORDER BY id`)
+      .bind("inbox-retry")
+      .all<{ outcome: string; attempt: number; http_status: number | null; latency_ms: number | null; seq: number | null }>();
+    expect(attempts.results).toHaveLength(1);
+    expect(attempts.results![0]).toMatchObject({
+      outcome: "http_error",
+      attempt: 1,
+      http_status: 500,
+      seq: 42,
+    });
+    expect(typeof attempts.results![0].latency_ms).toBe("number");
+
+    // Advance past backoff and flush via cron path.
+    setClockForTest(() => T0 + 6 * 60_000);
+    const flush = await flushPendingForwards(env);
+    expect(flush.delivered).toBe(1);
+    expect(hits).toBe(2);
+    const leftover = await db
+      .prepare(`SELECT COUNT(*) AS n FROM agent_pending_forwards WHERE inbox_id = ?`)
+      .bind("inbox-retry")
+      .first<{ n: number }>();
+    expect(leftover?.n).toBe(0);
+    const successLog = await db
+      .prepare(`SELECT outcome FROM agent_delivery_attempts WHERE inbox_id = ? AND outcome = 'success'`)
+      .bind("inbox-retry")
+      .first<{ outcome: string }>();
+    expect(successLog?.outcome).toBe("success");
+  });
+
+  it("flushes pending ordered by seq ascending", async () => {
+    const db = await freshDb();
+    const env = testEnv(db, fakeQueue());
+    await createAgentSubscriber(env, { url: "https://ordered.example/hook" });
+    const seen: number[] = [];
+    stubFetch((_url, init) => {
+      const body = String(init.body);
+      const m = /"seq":(\d+)/.exec(body);
+      if (m) seen.push(Number(m[1]));
+      return okResp();
+    });
+
+    for (const seq of [30, 10, 20]) {
+      const id = `inbox-seq-${seq}`;
+      const raw = JSON.stringify({ event: "odds_delta", seq });
+      await seedInbox(db, { id, rawBody: raw, eventType: "odds_delta", seq });
+      await stageFanoutPending(env, {
+        eventType: "odds_delta",
+        rawBody: raw,
+        qualityFlags: [],
+        meetingDate: "2026-10-07",
+        inboxId: id,
+        seq,
+      });
+    }
+
+    // Do not call per-inbox fanout — flush globally so ordering is exercised.
+    const flush = await flushPendingForwards(env, { limit: 10 });
+    expect(flush.delivered).toBe(3);
+    expect(seen).toEqual([10, 20, 30]);
   });
 });
 
