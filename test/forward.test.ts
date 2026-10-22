@@ -49,6 +49,7 @@ async function applyMigrationsInOrder(db: D1Database): Promise<void> {
     "0003_runner_id.sql",
     "0004_agent_subscribers.sql",
     "0005_agent_subscribers_rebuild.sql",
+    "0006_fanout_reliable_delivery.sql",
   ]);
   for (const file of files) {
     const sql = readFileSync(new URL(file, dir), "utf8").replace(/--[^\n]*/g, "");
@@ -56,8 +57,8 @@ async function applyMigrationsInOrder(db: D1Database): Promise<void> {
   }
 }
 
-describe("migrations 0001–0005 sequence", () => {
-  it("applies in order and creates a subscriber with NULL event_filter", async () => {
+describe("migrations 0001–0006 sequence", () => {
+  it("applies in order, restores pending forwards, and allows NULL event_filter", async () => {
     const mf = new Miniflare({
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } }",
@@ -71,7 +72,14 @@ describe("migrations 0001–0005 sequence", () => {
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_pending_forwards'`,
       )
       .first<{ name: string }>();
-    expect(pending).toBeNull();
+    expect(pending?.name).toBe("agent_pending_forwards");
+
+    const attempts = await db
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_delivery_attempts'`,
+      )
+      .first<{ name: string }>();
+    expect(attempts?.name).toBe("agent_delivery_attempts");
 
     const cols = await db.prepare(`PRAGMA table_info(agent_subscribers)`).all<{
       name: string;

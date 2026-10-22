@@ -9,6 +9,7 @@ import {
   handleListAgentSubscribers,
   handleUpdateAgentSubscriber,
 } from "./http";
+import { flushPendingForwards } from "./fanout";
 import { runDispatcher } from "./outbox";
 import { handleWebhook } from "./webhook";
 import { handleMcp } from "./mcp";
@@ -50,6 +51,13 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runDispatcher(env).then(() => undefined));
+    ctx.waitUntil(
+      Promise.all([
+        runDispatcher(env).then(() => undefined),
+        // Agent fan-out pending queue (issue #10): retry failed / deferred
+        // subscriber deliveries ordered by seq.
+        flushPendingForwards(env).then(() => undefined),
+      ]),
+    );
   },
 };
