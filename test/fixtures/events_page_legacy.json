@@ -1,0 +1,46 @@
+{
+  "_comment": "Desensitized /v1/events page without next_since_seq / truncated_by_bytes (current worker). Fake UUIDs, names, example.invalid.",
+  "meeting_date": "2026-10-21",
+  "venue": "HV",
+  "since_seq": 0,
+  "limit": 20,
+  "response": {
+    "events": [
+      {
+        "schema": "hkjc-push/1.1",
+        "event": "odds_delta",
+        "event_id": "00000000-0000-4000-8000-000000000101",
+        "seq": 1,
+        "meeting_date": "2026-10-21",
+        "venue": "HV",
+        "races": [
+          {
+            "race_no": 1,
+            "changes": [
+              {
+                "runner_id": "X_LEGACY01",
+                "race_no": 1,
+                "horse_no": 1,
+                "horse_name": "TEST LEGACY ONE",
+                "status": "Declared",
+                "pool": "WIN",
+                "odds": 5.0,
+                "odds_basis": "WIN",
+                "captured_at": "2026-10-21T19:00:00+08:00"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "schema": "hkjc-push/1.1",
+        "event": "odds_delta",
+        "event_id": "00000000-0000-4000-8000-000000000102",
+        "seq": 2,
+        "meeting_date": "2026-10-21",
+        "venue": "HV",
+        "races": []
+      }
+    ]
+  }
+}
