@@ -331,13 +331,114 @@ describe("collectWorker", () => {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    expect(message).toBeTruthy();
+    expect(message).toBe("collector: source request failed (403)");
     expect(message).not.toContain(TOKEN);
     expect(message).not.toContain(secretResponse);
     expect(await eventRows(db)).toEqual([]);
     const storedDocuments = await db.prepare("SELECT raw_body FROM collection_documents").all<{ raw_body: string }>();
     expect(JSON.stringify(storedDocuments.results)).not.toContain(secretResponse);
     expect(JSON.stringify(storedDocuments.results)).not.toContain(TOKEN);
+    const meta = await db.prepare(
+      `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
+    ).first<{ value: string }>();
+    expect(meta).toBeTruthy();
+    const recorded = JSON.parse(meta!.value) as { reason: string; at: string };
+    expect(recorded.reason).toBe("403");
+    expect(recorded.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(JSON.stringify(recorded)).not.toContain(TOKEN);
+    expect(JSON.stringify(recorded)).not.toContain(secretResponse);
+  });
+
+  it("uses HKJC_WORKER service binding when present and skips global fetch", async () => {
+    const db = await freshDb();
+    const date = hktToday();
+    const bindingFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname === "/v1/meetings") return meetings([]);
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+    const globalFetch = vi.fn(async () => {
+      throw new Error("global fetch must not be used when binding exists");
+    }) as unknown as typeof fetch;
+    const env = envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" });
+    env.HKJC_WORKER = { fetch: bindingFetch } as Fetcher;
+
+    const result = await collectWorker(env, globalFetch);
+
+    expect(result.skipped).toBe(false);
+    expect(result.requests).toBe(1);
+    expect(bindingFetch).toHaveBeenCalledTimes(1);
+    expect(globalFetch).not.toHaveBeenCalled();
+    const call = bindingFetch.mock.calls[0];
+    const calledUrl = new URL(String(call[0]));
+    expect(calledUrl.origin).toBe(API_BASE);
+    expect(calledUrl.pathname).toBe("/v1/meetings");
+    const headers = new Headers(call[1]?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(call[1]?.redirect).toBe("error");
+  });
+
+  it("falls back to global fetch when HKJC_WORKER binding is absent", async () => {
+    const db = await freshDb();
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") return meetings([]);
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+    const env = envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" });
+    expect(env.HKJC_WORKER).toBeUndefined();
+
+    const result = await collectWorker(env, fetchImpl);
+
+    expect(result.skipped).toBe(false);
+    expect(result.requests).toBe(1);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url.pathname).toBe("/v1/meetings");
+  });
+
+  it.each([
+    ["size", () => new Response("{}", { status: 200, headers: { "Content-Length": "1500001" } }), "size"],
+    ["timeout", () => {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    }, "timeout"],
+    ["redirect", () => {
+      throw new TypeError("fetch failed: Redirect was not allowed");
+    }, "redirect"],
+    ["network", () => {
+      throw new TypeError("fetch failed");
+    }, "network"],
+    ["json", () => new Response("not-json{", { status: 200, headers: { "Content-Type": "application/json" } }), "json"],
+  ] as const)("records last_collection_error reason %s without leaking secrets", async (_label, respond, reason) => {
+    const db = await freshDb();
+    const { fetchImpl } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") {
+        const out = respond();
+        return out;
+      }
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+
+    await expect(collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" }), fetchImpl))
+      .rejects.toThrow(`collector: source request failed (${reason})`);
+
+    const meta = await db.prepare(
+      `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
+    ).first<{ value: string }>();
+    expect(JSON.parse(meta!.value)).toMatchObject({ reason });
+    expect(meta!.value).not.toContain(TOKEN);
+  });
+
+  it("exposes last_collection_error on /health", async () => {
+    const db = await freshDb();
+    const { fetchImpl } = routeFetch(() => new Response("nope", { status: 502 }));
+    await expect(collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" }), fetchImpl))
+      .rejects.toThrow("collector: source request failed (502)");
+
+    const health = await (await import("../src/http")).handleHealth(envFor(db));
+    const body = await health.json() as { last_collection_error: string | null; last_collection_ok: string | null };
+    expect(body.last_collection_ok).toBeNull();
+    expect(JSON.parse(body.last_collection_error!)).toMatchObject({ reason: "502" });
   });
 
   it("keeps date/venue cursors isolated", async () => {
@@ -482,7 +583,9 @@ describe("collectWorker", () => {
       expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
       expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
       expect(results.find((result) => result.status === "rejected")).toMatchObject({
-        reason: expect.objectContaining({ message: "collector: source request failed" }),
+        reason: expect.objectContaining({
+          message: expect.stringMatching(/^collector: source request failed \(\d{3}\)$/),
+        }),
       });
       expect(queue.sent).toEqual([{ body: { inbox_id: "scheduled-inbox" }, delay: undefined }]);
     } finally {

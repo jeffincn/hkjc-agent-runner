@@ -12,6 +12,15 @@ const MAX_BYTES = 1_500_000;
 type Meeting = { meeting_date: string; venue: "ST" | "HV" };
 type EventRow = Meeting & { event_id: string; seq: number };
 
+/** Coarse failure reasons only — never bodies, headers, or tokens. */
+export type CollectionFailReason =
+  | `${number}`
+  | "size"
+  | "timeout"
+  | "redirect"
+  | "network"
+  | "json";
+
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("collector: invalid response");
   return value as Record<string, unknown>;
@@ -29,6 +38,41 @@ function meeting(value: unknown): Meeting {
 }
 function day(offset: number): string {
   return new Date(nowMs() + 8 * 3600_000 + offset * 86400_000).toISOString().slice(0, 10);
+}
+
+function sourceFetch(env: Env, fetchImpl: typeof fetch): typeof fetch {
+  const bound = env.HKJC_WORKER;
+  if (bound) {
+    return ((input: RequestInfo | URL, init?: RequestInit) => bound.fetch(input, init)) as typeof fetch;
+  }
+  return fetchImpl;
+}
+
+/** Map thrown values to a coarse reason; never include response text or tokens. */
+export function classifySourceFailure(err: unknown): CollectionFailReason {
+  if (err && typeof err === "object") {
+    const name = "name" in err ? String((err as { name: unknown }).name) : "";
+    if (name === "TimeoutError" || name === "AbortError") return "timeout";
+  }
+  if (err instanceof SyntaxError) return "json";
+  if (err instanceof Error) {
+    const msg = err.message;
+    if (/^\d{3}$/.test(msg)) return msg as CollectionFailReason;
+    if (msg === "size") return "size";
+    if (msg === "timeout") return "timeout";
+    if (msg === "redirect" || /redirect/i.test(msg)) return "redirect";
+    if (msg === "json" || msg === "collector: invalid response" || /JSON/i.test(msg)) return "json";
+    if (/aborted|timeout/i.test(msg)) return "timeout";
+  }
+  return "network";
+}
+
+async function recordCollectionError(env: Env, reason: CollectionFailReason, at: string): Promise<void> {
+  // Value holds reason + timestamp only; updated_at mirrors at for meta queries.
+  await env.DB.prepare(
+    `INSERT INTO runner_meta (key,value,updated_at) VALUES ('last_collection_error',?,?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+  ).bind(JSON.stringify({ reason, at }), at).run();
 }
 
 /** Archive only: never invokes webhook handling, agents, queues, or subscriber fan-out. */
@@ -51,18 +95,19 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
   const from = day(-envInt(env.HKJC_COLLECT_LOOKBACK_DAYS, 2, 0, 60));
   const to = day(envInt(env.HKJC_COLLECT_LOOKAHEAD_DAYS, 7, 0, 30));
   const timestamp = () => new Date(nowMs()).toISOString();
+  const doFetch = sourceFetch(env, fetchImpl);
   async function get(path: string, params: Record<string, string>): Promise<{ text: string; data: Record<string, unknown> }> {
     const url = new URL(path, SOURCE);
     url.search = new URLSearchParams(params).toString();
     report.requests++;
     let response: Response;
     try {
-      response = await fetchImpl(url.toString(), {
+      response = await doFetch(url.toString(), {
         headers: { Authorization: `Bearer ${env.HKJC_API_TOKEN}`, "User-Agent": "hkjc-agent-runner/collector", Accept: "application/json" },
         redirect: "error",
         signal: AbortSignal.timeout(10_000),
       });
-      if (!response.ok) throw new Error("http");
+      if (!response.ok) throw new Error(String(response.status));
       // Bound both declared and streamed bodies; never log error bodies or headers.
       if (Number(response.headers.get("Content-Length")) > MAX_BYTES) throw new Error("size");
       const reader = response.body?.getReader();
@@ -80,9 +125,22 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
       const text = new TextDecoder().decode(bytes);
-      return { text, data: object(JSON.parse(text)) };
-    } catch {
-      throw new Error("collector: source request failed");
+      let data: Record<string, unknown>;
+      try {
+        data = object(JSON.parse(text));
+      } catch {
+        throw new Error("json");
+      }
+      return { text, data };
+    } catch (err) {
+      const reason = classifySourceFailure(err);
+      const at = timestamp();
+      try {
+        await recordCollectionError(env, reason, at);
+      } catch {
+        // Meta write must not hide the original source failure.
+      }
+      throw new Error(`collector: source request failed (${reason})`);
     }
   }
   async function archive(kind: string, date: string, venue: string, text: string): Promise<void> {
