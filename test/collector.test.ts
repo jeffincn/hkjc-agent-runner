@@ -375,9 +375,11 @@ describe("collectWorker", () => {
 
     try {
       await worker.scheduled({} as ScheduledEvent, env, ctx);
+      // Three independent cron jobs: outbox dispatcher, fanout pending flush (PR #11),
+      // and pull-only collection. A collection failure must not block the others.
       const results = await Promise.allSettled(jobs);
-      expect(results).toHaveLength(2);
-      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results).toHaveLength(3);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
       expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
       expect(results.find((result) => result.status === "rejected")).toMatchObject({
         reason: expect.objectContaining({ message: "collector: source request failed" }),
