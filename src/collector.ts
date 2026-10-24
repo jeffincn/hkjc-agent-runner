@@ -4,6 +4,12 @@ import { sha256Hex } from "./crypto";
 import { parseEnvelope } from "./envelope";
 
 const SOURCE = "https://hkjc.cf-connect.top";
+/**
+ * Synthetic origin for HKJC_WORKER service-binding fetches.
+ * Routing uses the binding, not this hostname; Host must NOT be the custom
+ * domain or zone redirect/browser_check still fires under redirect:"error".
+ */
+const BINDING_ORIGIN = "https://hkjc-data-worker";
 /** limit=500 pages are 15–20MB and blow the response cap; keep pages small. */
 const PAGE_SIZE = 20;
 const LEASE_MS = 15 * 60_000;
@@ -96,8 +102,10 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
   const to = day(envInt(env.HKJC_COLLECT_LOOKAHEAD_DAYS, 7, 0, 30));
   const timestamp = () => new Date(nowMs()).toISOString();
   const doFetch = sourceFetch(env, fetchImpl);
+  // Binding routes by service, not Host; avoid custom-domain zone redirects.
+  const requestOrigin = env.HKJC_WORKER ? BINDING_ORIGIN : SOURCE;
   async function get(path: string, params: Record<string, string>): Promise<{ text: string; data: Record<string, unknown> }> {
-    const url = new URL(path, SOURCE);
+    const url = new URL(path, requestOrigin);
     url.search = new URLSearchParams(params).toString();
     report.requests++;
     let response: Response;

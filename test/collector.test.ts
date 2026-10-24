@@ -5,6 +5,8 @@ import type { Env } from "../src/env";
 import { fakeQueue, freshDb, testEnv } from "./helpers";
 
 const API_BASE = "https://hkjc.cf-connect.top";
+/** Must match collector BINDING_ORIGIN — not the custom domain. */
+const BINDING_ORIGIN = "https://hkjc-data-worker";
 const TOKEN = "collector-test-token-do-not-leak";
 
 function hktToday(): string {
@@ -349,12 +351,15 @@ describe("collectWorker", () => {
     expect(JSON.stringify(recorded)).not.toContain(secretResponse);
   });
 
-  it("uses HKJC_WORKER service binding when present and skips global fetch", async () => {
+  it("uses HKJC_WORKER service binding with internal hostname (not custom domain)", async () => {
     const db = await freshDb();
-    const date = hktToday();
-    const bindingFetch = vi.fn(async (input: RequestInfo | URL) => {
+    const bindingFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-      if (url.pathname === "/v1/meetings") return meetings([]);
+      if (url.pathname === "/v1/meetings") {
+        expect(url.searchParams.get("from")).toBeTruthy();
+        expect(url.searchParams.get("to")).toBeTruthy();
+        return meetings([]);
+      }
       throw new Error(`unexpected ${url.pathname}`);
     });
     const globalFetch = vi.fn(async () => {
@@ -371,14 +376,18 @@ describe("collectWorker", () => {
     expect(globalFetch).not.toHaveBeenCalled();
     const call = bindingFetch.mock.calls[0];
     const calledUrl = new URL(String(call[0]));
-    expect(calledUrl.origin).toBe(API_BASE);
+    expect(calledUrl.origin).toBe(BINDING_ORIGIN);
+    expect(calledUrl.origin).not.toBe(API_BASE);
+    expect(calledUrl.hostname).not.toBe("hkjc.cf-connect.top");
     expect(calledUrl.pathname).toBe("/v1/meetings");
+    expect(calledUrl.searchParams.has("from")).toBe(true);
+    expect(calledUrl.searchParams.has("to")).toBe(true);
     const headers = new Headers(call[1]?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(call[1]?.redirect).toBe("error");
   });
 
-  it("falls back to global fetch when HKJC_WORKER binding is absent", async () => {
+  it("falls back to pinned SOURCE origin when HKJC_WORKER binding is absent", async () => {
     const db = await freshDb();
     const { fetchImpl, requests } = routeFetch((url) => {
       if (url.pathname === "/v1/meetings") return meetings([]);
@@ -392,7 +401,12 @@ describe("collectWorker", () => {
     expect(result.skipped).toBe(false);
     expect(result.requests).toBe(1);
     expect(requests).toHaveLength(1);
+    expect(requests[0].url.origin).toBe(API_BASE);
+    expect(requests[0].url.hostname).toBe("hkjc.cf-connect.top");
     expect(requests[0].url.pathname).toBe("/v1/meetings");
+    const headers = new Headers(requests[0].init?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(requests[0].init?.redirect).toBe("error");
   });
 
   it.each([
