@@ -16,6 +16,11 @@ export interface Env {
   OPENAI_BASE_URL?: string;
   HKJC_API_BASE?: string;
   HKJC_API_TOKEN?: string;
+  /** Explicit opt-in; pull-only archive, no analysis or fan-out. */
+  HKJC_COLLECT_ENABLED?: string;
+  HKJC_COLLECT_MAX_REQUESTS?: string;
+  HKJC_COLLECT_LOOKBACK_DAYS?: string;
+  HKJC_COLLECT_LOOKAHEAD_DAYS?: string;
   ODDS_COALESCE_SECONDS?: string;
   MAX_ROUNDS?: string;
   MAX_PROCESS_ATTEMPTS?: string;

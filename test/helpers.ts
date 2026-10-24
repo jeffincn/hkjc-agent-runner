@@ -14,6 +14,10 @@ async function freshDb(): Promise<D1Database> {
   });
   const db = await mf.getD1Database("DB");
   for (const table of [
+    "collection_lock",
+    "collection_documents",
+    "collection_cursors",
+    "collection_events",
     "odds_ledger",
     "analysis_validation",
     "seq_gaps",

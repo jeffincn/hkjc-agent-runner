@@ -4,6 +4,8 @@
 
 设计说明见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+新增可选的 [Cron 拉取归档](docs/COLLECTION.md)：从自己的 Worker 读取事件、排位和赛果并保存到独立 D1 表；默认关闭，不开启 webhook、不触发分析或外发。原有五分钟 outbox cron 保持不变。
+
 线上地址：`https://hkjc-agent.cf-connect.top`（Worker 名 `hkjc-agent-runner`）。
 
 ## 怎么接入

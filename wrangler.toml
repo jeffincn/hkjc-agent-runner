@@ -20,6 +20,11 @@ MAX_PROCESS_ATTEMPTS = "4"
 # OPENAI_MODEL = ""
 # Optional: base URL of hkjc-data-worker for horse/injury/result detail lookups.
 # HKJC_API_BASE = "https://hkjc.cf-connect.top"
+# Review-only default: enable explicitly after migrating and setting HKJC_API_TOKEN.
+HKJC_COLLECT_ENABLED = "false"
+HKJC_COLLECT_MAX_REQUESTS = "20"
+HKJC_COLLECT_LOOKBACK_DAYS = "2"
+HKJC_COLLECT_LOOKAHEAD_DAYS = "7"
 # Secrets (wrangler secret put): PUSH_SECRET, OPENAI_API_KEY, RUNNER_API_TOKEN, HKJC_API_TOKEN
 
 [[d1_databases]]
@@ -39,6 +44,6 @@ max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "hkjc-agent-events-dlq"
 
-# Outbox dispatcher + stale-lease sweeper.
+# Outbox dispatcher + stale-lease sweeper + opt-in pull-only collection.
 [triggers]
 crons = ["*/5 * * * *"]
