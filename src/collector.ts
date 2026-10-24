@@ -4,12 +4,6 @@ import { sha256Hex } from "./crypto";
 import { parseEnvelope } from "./envelope";
 
 const SOURCE = "https://hkjc.cf-connect.top";
-/**
- * Synthetic origin for HKJC_WORKER service-binding fetches.
- * Routing uses the binding, not this hostname; Host must NOT be the custom
- * domain or zone redirect/browser_check still fires under redirect:"error".
- */
-const BINDING_ORIGIN = "https://hkjc-data-worker";
 /** limit=500 pages are 15–20MB and blow the response cap; keep pages small. */
 const PAGE_SIZE = 20;
 const LEASE_MS = 15 * 60_000;
@@ -102,19 +96,20 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
   const to = day(envInt(env.HKJC_COLLECT_LOOKAHEAD_DAYS, 7, 0, 30));
   const timestamp = () => new Date(nowMs()).toISOString();
   const doFetch = sourceFetch(env, fetchImpl);
-  // Binding routes by service, not Host; avoid custom-domain zone redirects.
-  const requestOrigin = env.HKJC_WORKER ? BINDING_ORIGIN : SOURCE;
   async function get(path: string, params: Record<string, string>): Promise<{ text: string; data: Record<string, unknown> }> {
-    const url = new URL(path, requestOrigin);
+    const url = new URL(path, SOURCE);
     url.search = new URLSearchParams(params).toString();
     report.requests++;
     let response: Response;
     try {
+      // Workers do not implement redirect:"error" (TypeError on Request construct).
+      // Use manual and refuse 3xx without following.
       response = await doFetch(url.toString(), {
         headers: { Authorization: `Bearer ${env.HKJC_API_TOKEN}`, "User-Agent": "hkjc-agent-runner/collector", Accept: "application/json" },
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10_000),
       });
+      if (response.status >= 300 && response.status < 400) throw new Error(String(response.status));
       if (!response.ok) throw new Error(String(response.status));
       // Bound both declared and streamed bodies; never log error bodies or headers.
       if (Number(response.headers.get("Content-Length")) > MAX_BYTES) throw new Error("size");
