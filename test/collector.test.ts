@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectWorker } from "../src/collector";
+import { collectWorker, safeRedirectLocation } from "../src/collector";
 import worker from "../src/index";
 import type { Env } from "../src/env";
 import { fakeQueue, freshDb, testEnv } from "./helpers";
@@ -342,8 +342,9 @@ describe("collectWorker", () => {
       `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
     ).first<{ value: string }>();
     expect(meta).toBeTruthy();
-    const recorded = JSON.parse(meta!.value) as { reason: string; at: string };
+    const recorded = JSON.parse(meta!.value) as { reason: string; at: string; path: string };
     expect(recorded.reason).toBe("403");
+    expect(recorded.path).toBe("fallback");
     expect(recorded.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(JSON.stringify(recorded)).not.toContain(TOKEN);
     expect(JSON.stringify(recorded)).not.toContain(secretResponse);
@@ -375,7 +376,7 @@ describe("collectWorker", () => {
     expect(calledUrl.pathname).toBe("/v1/meetings");
     const headers = new Headers(call[1]?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(call[1]?.redirect).toBe("error");
+    expect(call[1]?.redirect).toBe("manual");
   });
 
   it("falls back to global fetch when HKJC_WORKER binding is absent", async () => {
@@ -393,6 +394,7 @@ describe("collectWorker", () => {
     expect(result.requests).toBe(1);
     expect(requests).toHaveLength(1);
     expect(requests[0].url.pathname).toBe("/v1/meetings");
+    expect(requests[0].init?.redirect).toBe("manual");
   });
 
   it.each([
@@ -402,9 +404,6 @@ describe("collectWorker", () => {
       err.name = "TimeoutError";
       throw err;
     }, "timeout"],
-    ["redirect", () => {
-      throw new TypeError("fetch failed: Redirect was not allowed");
-    }, "redirect"],
     ["network", () => {
       throw new TypeError("fetch failed");
     }, "network"],
@@ -425,20 +424,115 @@ describe("collectWorker", () => {
     const meta = await db.prepare(
       `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
     ).first<{ value: string }>();
-    expect(JSON.parse(meta!.value)).toMatchObject({ reason });
+    expect(JSON.parse(meta!.value)).toMatchObject({ reason, path: "fallback" });
     expect(meta!.value).not.toContain(TOKEN);
   });
 
-  it("exposes last_collection_error on /health", async () => {
+  it("records redirect status, sanitized location, and fetch path without following", async () => {
+    const db = await freshDb();
+    const secretQuery = `token=${TOKEN}&next=/admin`;
+    let followed = false;
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: `https://login.example.invalid/callback?${secretQuery}#frag`,
+            "Set-Cookie": `session=${TOKEN}`,
+          },
+        });
+      }
+      followed = true;
+      throw new Error(`must not follow redirect to ${url.href}`);
+    });
+
+    await expect(collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" }), fetchImpl))
+      .rejects.toThrow("collector: source request failed (redirect)");
+
+    expect(followed).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].init?.redirect).toBe("manual");
+
+    const meta = await db.prepare(
+      `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
+    ).first<{ value: string }>();
+    const recorded = JSON.parse(meta!.value) as {
+      reason: string; path: string; status: number; location: string | null; at: string;
+    };
+    expect(recorded).toMatchObject({
+      reason: "redirect",
+      path: "fallback",
+      status: 302,
+      location: "https://login.example.invalid/callback",
+    });
+    expect(recorded.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(meta!.value).not.toContain(TOKEN);
+    expect(meta!.value).not.toContain(secretQuery);
+    expect(meta!.value).not.toContain("Set-Cookie");
+    expect(meta!.value).not.toContain("#frag");
+  });
+
+  it("records path=binding when a service-bound fetch returns 3xx", async () => {
+    const db = await freshDb();
+    const bindingFetch = vi.fn(async () => new Response(null, {
+      status: 307,
+      headers: { Location: "https://hkjc.cf-connect.top/v1/meetings/" },
+    }));
+    const env = envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" });
+    env.HKJC_WORKER = { fetch: bindingFetch } as Fetcher;
+
+    await expect(collectWorker(env, vi.fn() as unknown as typeof fetch))
+      .rejects.toThrow("collector: source request failed (redirect)");
+
+    const meta = await db.prepare(
+      `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
+    ).first<{ value: string }>();
+    expect(JSON.parse(meta!.value)).toMatchObject({
+      reason: "redirect",
+      path: "binding",
+      status: 307,
+      location: "https://hkjc.cf-connect.top/v1/meetings/",
+    });
+    expect(bindingFetch).toHaveBeenCalledTimes(1);
+    expect(bindingFetch.mock.calls[0][1]?.redirect).toBe("manual");
+  });
+
+  it("exposes last_collection_error and collector_binding_present on /health", async () => {
     const db = await freshDb();
     const { fetchImpl } = routeFetch(() => new Response("nope", { status: 502 }));
     await expect(collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" }), fetchImpl))
       .rejects.toThrow("collector: source request failed (502)");
 
-    const health = await (await import("../src/http")).handleHealth(envFor(db));
-    const body = await health.json() as { last_collection_error: string | null; last_collection_ok: string | null };
+    const withoutBinding = envFor(db);
+    const health = await (await import("../src/http")).handleHealth(withoutBinding);
+    const body = await health.json() as {
+      last_collection_error: string | null;
+      last_collection_ok: string | null;
+      collector_binding_present: boolean;
+    };
     expect(body.last_collection_ok).toBeNull();
-    expect(JSON.parse(body.last_collection_error!)).toMatchObject({ reason: "502" });
+    expect(JSON.parse(body.last_collection_error!)).toMatchObject({ reason: "502", path: "fallback" });
+    expect(body.collector_binding_present).toBe(false);
+
+    withoutBinding.HKJC_WORKER = { fetch: vi.fn() } as Fetcher;
+    const withBinding = await (await import("../src/http")).handleHealth(withoutBinding);
+    expect((await withBinding.json() as { collector_binding_present: boolean }).collector_binding_present).toBe(true);
+  });
+
+  describe("safeRedirectLocation", () => {
+    it("keeps scheme+host+pathname and strips query, fragment, and userinfo", () => {
+      expect(safeRedirectLocation("https://user:pass@ex.ample:8443/a/b?x=1#y"))
+        .toBe("https://ex.ample:8443/a/b");
+      expect(safeRedirectLocation("/rel?tok=secret", "https://hkjc.cf-connect.top"))
+        .toBe("https://hkjc.cf-connect.top/rel");
+    });
+
+    it("returns null for missing, non-http, or unparsable values", () => {
+      expect(safeRedirectLocation(null)).toBeNull();
+      expect(safeRedirectLocation("")).toBeNull();
+      expect(safeRedirectLocation("javascript:alert(1)")).toBeNull();
+      expect(safeRedirectLocation("http://[bad")).toBeNull();
+    });
   });
 
   it("keeps date/venue cursors isolated", async () => {

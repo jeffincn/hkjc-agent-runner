@@ -62,6 +62,8 @@ export async function healthBody(env: Env): Promise<Record<string, unknown>> {
     last_dispatcher_run: m("last_dispatcher_run"),
     last_collection_ok: m("last_collection_ok"),
     last_collection_error: m("last_collection_error"),
+    /** True when the HKJC_WORKER service binding is attached to this isolate. */
+    collector_binding_present: Boolean(env.HKJC_WORKER),
   };
 }
 

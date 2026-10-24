@@ -21,6 +21,35 @@ export type CollectionFailReason =
   | "network"
   | "json";
 
+export type CollectionFetchPath = "binding" | "fallback";
+
+/** Payload stored in runner_meta last_collection_error (no secrets). */
+export type CollectionErrorRecord = {
+  reason: CollectionFailReason;
+  at: string;
+  /** Whether the failing request used the service binding or public-URL fetch. */
+  path: CollectionFetchPath;
+  /** Present when reason is redirect (3xx status, never followed). */
+  status?: number;
+  /** scheme+host+pathname only; null when absent or unparsable. */
+  location?: string | null;
+};
+
+/**
+ * Reduce a Location header to scheme+host+pathname.
+ * Strips query, fragment, and userinfo; rejects non-http(s); never returns raw input on parse failure.
+ */
+export function safeRedirectLocation(raw: string | null | undefined, base = SOURCE): string | null {
+  if (raw == null || raw === "") return null;
+  try {
+    const u = new URL(raw, base);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("collector: invalid response");
   return value as Record<string, unknown>;
@@ -40,12 +69,25 @@ function day(offset: number): string {
   return new Date(nowMs() + 8 * 3600_000 + offset * 86400_000).toISOString().slice(0, 10);
 }
 
+function collectionFetchPath(env: Env): CollectionFetchPath {
+  return env.HKJC_WORKER ? "binding" : "fallback";
+}
+
 function sourceFetch(env: Env, fetchImpl: typeof fetch): typeof fetch {
   const bound = env.HKJC_WORKER;
   if (bound) {
     return ((input: RequestInfo | URL, init?: RequestInit) => bound.fetch(input, init)) as typeof fetch;
   }
   return fetchImpl;
+}
+
+type RedirectFail = Error & { redirectStatus: number; redirectLocation: string | null };
+
+function redirectFail(status: number, locationHeader: string | null): RedirectFail {
+  const err = new Error("redirect") as RedirectFail;
+  err.redirectStatus = status;
+  err.redirectLocation = safeRedirectLocation(locationHeader);
+  return err;
 }
 
 /** Map thrown values to a coarse reason; never include response text or tokens. */
@@ -67,12 +109,21 @@ export function classifySourceFailure(err: unknown): CollectionFailReason {
   return "network";
 }
 
-async function recordCollectionError(env: Env, reason: CollectionFailReason, at: string): Promise<void> {
-  // Value holds reason + timestamp only; updated_at mirrors at for meta queries.
+async function recordCollectionError(env: Env, record: CollectionErrorRecord): Promise<void> {
+  // Never bodies, full headers, query strings, or tokens — only coarse diagnostics.
+  const value: CollectionErrorRecord = {
+    reason: record.reason,
+    at: record.at,
+    path: record.path,
+  };
+  if (record.reason === "redirect") {
+    value.status = record.status;
+    value.location = record.location ?? null;
+  }
   await env.DB.prepare(
     `INSERT INTO runner_meta (key,value,updated_at) VALUES ('last_collection_error',?,?)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
-  ).bind(JSON.stringify({ reason, at }), at).run();
+  ).bind(JSON.stringify(value), record.at).run();
 }
 
 /** Archive only: never invokes webhook handling, agents, queues, or subscriber fan-out. */
@@ -95,6 +146,7 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
   const from = day(-envInt(env.HKJC_COLLECT_LOOKBACK_DAYS, 2, 0, 60));
   const to = day(envInt(env.HKJC_COLLECT_LOOKAHEAD_DAYS, 7, 0, 30));
   const timestamp = () => new Date(nowMs()).toISOString();
+  const fetchPath = collectionFetchPath(env);
   const doFetch = sourceFetch(env, fetchImpl);
   async function get(path: string, params: Record<string, string>): Promise<{ text: string; data: Record<string, unknown> }> {
     const url = new URL(path, SOURCE);
@@ -102,11 +154,15 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
     report.requests++;
     let response: Response;
     try {
+      // redirect:"manual" — never follow; inspect 3xx status + Location for diagnostics.
       response = await doFetch(url.toString(), {
         headers: { Authorization: `Bearer ${env.HKJC_API_TOKEN}`, "User-Agent": "hkjc-agent-runner/collector", Accept: "application/json" },
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10_000),
       });
+      if (response.status >= 300 && response.status < 400) {
+        throw redirectFail(response.status, response.headers.get("Location"));
+      }
       if (!response.ok) throw new Error(String(response.status));
       // Bound both declared and streamed bodies; never log error bodies or headers.
       if (Number(response.headers.get("Content-Length")) > MAX_BYTES) throw new Error("size");
@@ -135,8 +191,15 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
     } catch (err) {
       const reason = classifySourceFailure(err);
       const at = timestamp();
+      const record: CollectionErrorRecord = { reason, at, path: fetchPath };
+      if (reason === "redirect") {
+        const redir = err as Partial<RedirectFail>;
+        if (typeof redir.redirectStatus === "number") record.status = redir.redirectStatus;
+        if ("redirectLocation" in (err as object)) record.location = redir.redirectLocation ?? null;
+        else record.location = null;
+      }
       try {
-        await recordCollectionError(env, reason, at);
+        await recordCollectionError(env, record);
       } catch {
         // Meta write must not hide the original source failure.
       }
