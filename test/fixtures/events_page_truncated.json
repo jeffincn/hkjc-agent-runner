@@ -1,0 +1,58 @@
+{
+  "_comment": "Desensitized /v1/events page with upcoming worker byte truncation fields. Fake UUIDs / names; may be absent on today's worker.",
+  "meeting_date": "2026-10-25",
+  "venue": "ST",
+  "since_seq": 10,
+  "limit": 20,
+  "response": {
+    "events": [
+      {
+        "schema": "hkjc-push/1.1",
+        "event": "odds_delta",
+        "event_id": "00000000-0000-4000-8000-000000000201",
+        "seq": 11,
+        "meeting_date": "2026-10-25",
+        "venue": "ST",
+        "races": [
+          {
+            "race_no": 3,
+            "changes": [
+              {
+                "runner_id": "X_TRUNC01",
+                "race_no": 3,
+                "horse_no": 7,
+                "horse_name": "TEST TRUNC SEVEN",
+                "status": "Declared",
+                "pool": "PLA",
+                "odds": 3.5,
+                "odds_basis": "PLA",
+                "captured_at": "2026-10-25T20:15:00+08:00"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "schema": "hkjc-push/1.1",
+        "event": "odds_delta",
+        "event_id": "00000000-0000-4000-8000-000000000202",
+        "seq": 12,
+        "meeting_date": "2026-10-25",
+        "venue": "ST",
+        "races": []
+      },
+      {
+        "schema": "hkjc-push/1.1",
+        "event": "no_update",
+        "event_id": "00000000-0000-4000-8000-000000000203",
+        "seq": 13,
+        "meeting_date": "2026-10-25",
+        "venue": "ST",
+        "last_change_seq": 12,
+        "last_change_at": "2026-10-25T20:15:03+08:00"
+      }
+    ],
+    "truncated_by_bytes": true,
+    "next_since_seq": 13
+  }
+}

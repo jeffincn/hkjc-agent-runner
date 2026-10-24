@@ -4,7 +4,8 @@ import { sha256Hex } from "./crypto";
 import { parseEnvelope } from "./envelope";
 
 const SOURCE = "https://hkjc.cf-connect.top";
-const PAGE_SIZE = 500;
+/** limit=500 pages are 15–20MB and blow the response cap; keep pages small. */
+const PAGE_SIZE = 20;
 const LEASE_MS = 15 * 60_000;
 // Leave headroom below D1's 2,000,000-byte value/row limit.
 const MAX_BYTES = 1_500_000;
@@ -123,7 +124,17 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
           next = row.seq as number;
           events.push({ row: row as unknown as EventRow, text });
         }
-        if (events.length) {
+        // Upcoming worker may byte-truncate pages and return next_since_seq; absent today → length paging.
+        const truncatedByBytes = page.data.truncated_by_bytes === true;
+        const nextSinceSeq = page.data.next_since_seq;
+        if (truncatedByBytes) {
+          if (!Number.isSafeInteger(nextSinceSeq) || (nextSinceSeq as number) < next ||
+              (events.length === 0 && (nextSinceSeq as number) <= cursor)) {
+            throw new Error("collector: invalid events response");
+          }
+          next = nextSinceSeq as number;
+        }
+        if (events.length || (truncatedByBytes && next > cursor)) {
           // One JSON insert per page keeps D1 query/subrequest use bounded.
           // The immutable trigger rejects identity conflicts atomically with the cursor.
           const chunks: string[] = [];
@@ -155,6 +166,8 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
           cursor = next;
           report.events += events.length;
         }
+        // Byte-truncated pages may be shorter than limit but still have more data.
+        if (truncatedByBytes) continue;
         if (events.length < PAGE_SIZE) break;
       }
       report.meetings++;

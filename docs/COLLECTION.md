@@ -20,12 +20,14 @@
 每轮按香港日期查询最近两天至未来七天的 `/v1/meetings?from&to`，然后逐会议分页读取：
 
 ```text
-GET /v1/events?meeting_date=YYYY-MM-DD&venue=ST|HV&since_seq=N&limit=500
+GET /v1/events?meeting_date=YYYY-MM-DD&venue=ST|HV&since_seq=N&limit=20
 GET /v1/races?date=YYYY-MM-DD&venue=ST|HV
 GET /v1/results?date=YYYY-MM-DD&venue=ST|HV
 ```
 
-所有请求均带非空 User-Agent 和 Bearer token；只允许 GET。每轮默认最多 20 次请求，单请求超时 10 秒，响应上限 1,500,000 bytes（为 D1 单值/行大小留余量；超限失败且不推进游标）。预算用尽则保留已提交进度，下一轮继续。大量历史积压时事件回放优先，赛事/赛果归档可能推迟；列表靠后的会议也可能推迟处理。
+`/v1/events` 固定 `limit=20`（`limit=500` 实测可达 15–20MB，超过本端 1,500,000-byte 上限）。分页以 `since_seq` 推进；若响应含即将上线的 `truncated_by_bytes: true` 与 `next_since_seq`，则下一页使用 `next_since_seq`（即使本页条数少于 limit）。二者皆缺时仍按「满页继续、短页结束」兼容现有 Worker。
+
+所有请求均带非空 User-Agent 和 Bearer token；只允许 GET。每轮默认最多 20 次请求，单请求超时 10 秒，响应上限 1,500,000 bytes（为 D1 单值/行大小留余量；超限失败且不推进游标）。预算用尽则保留已提交进度（`collection_cursors`），下一轮从断点继续。大量历史积压时事件回放优先，赛事/赛果归档可能推迟；列表靠后的会议也可能推迟处理。
 
 归档保存在 runner 自己绑定的 D1，而非数据源 D1：
 

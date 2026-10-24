@@ -121,18 +121,18 @@ describe("collectWorker", () => {
     expect(headers.get("user-agent")).toBeTruthy();
   });
 
-  it("paginates with a monotonic cursor and persists each validated page", async () => {
+  it("paginates with limit=20, a monotonic cursor, and persists each validated page", async () => {
     const db = await freshDb();
     const date = hktToday();
-    const firstPage = Array.from({ length: 500 }, (_, i) => event(date, "HV", i + 1));
+    const firstPage = Array.from({ length: 20 }, (_, i) => event(date, "HV", i + 1));
     const { fetchImpl, requests } = routeFetch((url) => {
       if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "HV" }]);
       if (url.pathname === "/v1/events") {
         const cursor = Number(url.searchParams.get("since_seq"));
         expect(url.searchParams.get("meeting_date")).toBe(date);
         expect(url.searchParams.get("venue")).toBe("HV");
-        expect(url.searchParams.get("limit")).toBe("500");
-        return json({ events: cursor === 0 ? firstPage : [event(date, "HV", 501)] });
+        expect(url.searchParams.get("limit")).toBe("20");
+        return json({ events: cursor === 0 ? firstPage : [event(date, "HV", 21)] });
       }
       throw new Error(`unexpected route ${url.pathname}`);
     });
@@ -150,9 +150,109 @@ describe("collectWorker", () => {
       "/v1/events",
     ]);
     expect(requests[1].url.searchParams.get("since_seq")).toBe("0");
-    expect(requests[2].url.searchParams.get("since_seq")).toBe("500");
-    expect(await db.prepare("SELECT COUNT(*) AS n FROM collection_events").first("n")).toBe(501);
-    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "HV", last_seq: 501 }]);
+    expect(requests[2].url.searchParams.get("since_seq")).toBe("20");
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM collection_events").first("n")).toBe(21);
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "HV", last_seq: 21 }]);
+  });
+
+  it("stops on a short page when next_since_seq is absent (legacy worker)", async () => {
+    const db = await freshDb();
+    const date = hktToday();
+    const legacy = (await import("./fixtures/events_page_legacy.json")).default;
+    const pageEvents = (legacy.response.events as ReturnType<typeof event>[]).map((row, i) =>
+      event(date, "HV", i + 1, row.event_id),
+    );
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "HV" }]);
+      if (url.pathname === "/v1/events") {
+        expect(url.searchParams.get("limit")).toBe("20");
+        expect(url.searchParams.has("next_since_seq")).toBe(false);
+        return json({ events: pageEvents });
+      }
+      if (url.pathname === "/v1/races") return json({ races: [] });
+      if (url.pathname === "/v1/results") return json({ results: [] });
+      throw new Error(`unexpected route ${url.pathname}`);
+    });
+
+    const result = await collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "4" }), fetchImpl);
+
+    expect(requests.filter((r) => r.url.pathname === "/v1/events")).toHaveLength(1);
+    expect(result.events).toBe(2);
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "HV", last_seq: 2 }]);
+  });
+
+  it("continues with next_since_seq when truncated_by_bytes is set", async () => {
+    const db = await freshDb();
+    const date = hktToday();
+    const truncated = (await import("./fixtures/events_page_truncated.json")).default;
+    const firstEvents = (truncated.response.events as { event_id: string; seq: number }[]).map((row) =>
+      event(date, "ST", row.seq, row.event_id),
+    );
+    const seenSince: string[] = [];
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "ST" }]);
+      if (url.pathname === "/v1/events") {
+        expect(url.searchParams.get("limit")).toBe("20");
+        const since = url.searchParams.get("since_seq")!;
+        seenSince.push(since);
+        if (since === "0") {
+          return json({
+            events: firstEvents,
+            truncated_by_bytes: true,
+            next_since_seq: truncated.response.next_since_seq,
+          });
+        }
+        if (since === String(truncated.response.next_since_seq)) {
+          return json({ events: [event(date, "ST", 14, "00000000-0000-4000-8000-000000000204")] });
+        }
+        throw new Error(`unexpected since_seq ${since}`);
+      }
+      if (url.pathname === "/v1/races") return json({ races: [] });
+      if (url.pathname === "/v1/results") return json({ results: [] });
+      throw new Error(`unexpected route ${url.pathname}`);
+    });
+
+    const result = await collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "4" }), fetchImpl);
+
+    expect(seenSince).toEqual(["0", "13"]);
+    expect(requests.filter((r) => r.url.pathname === "/v1/events")).toHaveLength(2);
+    expect(result.events).toBe(4);
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "ST", last_seq: 14 }]);
+  });
+
+  it("resumes from the persisted cursor on the next cron run", async () => {
+    const db = await freshDb();
+    const date = hktToday();
+    let round = 0;
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "ST" }]);
+      if (url.pathname === "/v1/events") {
+        const since = Number(url.searchParams.get("since_seq"));
+        expect(url.searchParams.get("limit")).toBe("20");
+        if (round === 0) {
+          return json({
+            events: Array.from({ length: 20 }, (_, i) => event(date, "ST", since + i + 1)),
+          });
+        }
+        return json({ events: [event(date, "ST", since + 1)] });
+      }
+      if (url.pathname === "/v1/races") return json({ races: [] });
+      if (url.pathname === "/v1/results") return json({ results: [] });
+      throw new Error(`unexpected route ${url.pathname}`);
+    });
+    const env = envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "2" });
+
+    const first = await collectWorker(env, fetchImpl);
+    expect(first.events).toBe(20);
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "ST", last_seq: 20 }]);
+
+    round = 1;
+    const second = await collectWorker(env, fetchImpl);
+    expect(second.events).toBe(1);
+    const eventCalls = requests.filter((r) => r.url.pathname === "/v1/events");
+    expect(eventCalls[0].url.searchParams.get("since_seq")).toBe("0");
+    expect(eventCalls[1].url.searchParams.get("since_seq")).toBe("20");
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "ST", last_seq: 21 }]);
   });
 
   it("treats a replayed event_id idempotently while validating and advancing its cursor", async () => {
@@ -397,7 +497,8 @@ describe("collectWorker", () => {
       if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "ST" }]);
       if (url.pathname === "/v1/events") {
         const cursor = Number(url.searchParams.get("since_seq"));
-        return json({ events: Array.from({ length: 500 }, (_, i) => event(date, "ST", cursor + i + 1)) });
+        expect(url.searchParams.get("limit")).toBe("20");
+        return json({ events: Array.from({ length: 20 }, (_, i) => event(date, "ST", cursor + i + 1)) });
       }
       throw new Error(`budget should have stopped before ${url.pathname}`);
     });
@@ -411,6 +512,25 @@ describe("collectWorker", () => {
     expect(requests).toHaveLength(result.requests);
     expect(result.requests).toBe(40);
     expect(requests.every((request) => request.url.pathname === "/v1/events" || request.url.pathname === "/v1/meetings")).toBe(true);
-    expect(await db.prepare("SELECT last_seq FROM collection_cursors WHERE meeting_date = ? AND venue = 'ST'").bind(date).first("last_seq")).toBe(39 * 500);
+    expect(await db.prepare("SELECT last_seq FROM collection_cursors WHERE meeting_date = ? AND venue = 'ST'").bind(date).first("last_seq")).toBe(39 * 20);
+  });
+
+  it("defaults to at most 20 source requests per cron run", async () => {
+    const db = await freshDb();
+    const date = hktToday();
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.pathname === "/v1/meetings") return meetings([{ date, venue: "ST" }]);
+      if (url.pathname === "/v1/events") {
+        const cursor = Number(url.searchParams.get("since_seq"));
+        return json({ events: Array.from({ length: 20 }, (_, i) => event(date, "ST", cursor + i + 1)) });
+      }
+      throw new Error(`budget should have stopped before ${url.pathname}`);
+    });
+
+    const result = await collectWorker(envFor(db), fetchImpl);
+
+    expect(result.requests).toBe(20);
+    expect(requests).toHaveLength(20);
+    expect(await cursorRows(db)).toEqual([{ meeting_date: date, venue: "ST", last_seq: 19 * 20 }]);
   });
 });
