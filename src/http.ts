@@ -60,6 +60,8 @@ export async function healthBody(env: Env): Promise<Record<string, unknown>> {
     last_model_ok: m("last_model_ok"),
     last_model_error: m("last_model_error"),
     last_dispatcher_run: m("last_dispatcher_run"),
+    last_collection_ok: m("last_collection_ok"),
+    last_collection_error: m("last_collection_error"),
   };
 }
 

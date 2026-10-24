@@ -5,6 +5,12 @@ export interface QueueMessageBody {
 export interface Env {
   DB: D1Database;
   EVENTS_QUEUE: Queue<QueueMessageBody>;
+  /**
+   * Optional service binding to hkjc-data-worker (same account).
+   * When set, the collector uses it instead of public-URL fetch to avoid
+   * Worker-to-Worker / zone browser_check blocks.
+   */
+  HKJC_WORKER?: Fetcher;
   /** Shared with hkjc-data-worker; when set, X-Signature is required and verified. */
   PUSH_SECRET?: string;
   /** Bearer token for GET /runs/:id. */

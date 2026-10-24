@@ -18,14 +18,20 @@ MAX_ROUNDS = "3"
 MAX_PROCESS_ATTEMPTS = "4"
 # OPENAI_MODEL must be set explicitly (no default is baked in).
 # OPENAI_MODEL = ""
-# Optional: base URL of hkjc-data-worker for horse/injury/result detail lookups.
-# HKJC_API_BASE = "https://hkjc.cf-connect.top"
-# Review-only default: enable explicitly after migrating and setting HKJC_API_TOKEN.
-HKJC_COLLECT_ENABLED = "false"
+# Base URL of hkjc-data-worker (pinned origin for collector + detail lookups).
+HKJC_API_BASE = "https://hkjc.cf-connect.top"
+# Jeff approved turning collection on 2026-10-25.
+HKJC_COLLECT_ENABLED = "true"
 HKJC_COLLECT_MAX_REQUESTS = "20"
 HKJC_COLLECT_LOOKBACK_DAYS = "2"
 HKJC_COLLECT_LOOKAHEAD_DAYS = "7"
 # Secrets (wrangler secret put): PUSH_SECRET, OPENAI_API_KEY, RUNNER_API_TOKEN, HKJC_API_TOKEN
+
+# Same-account service binding to hkjc-data-worker (repo jeffincn/hkjc-worker; wrangler name).
+# Prefer this over public-URL fetch so zone browser_check does not block Worker→Worker.
+[[services]]
+binding = "HKJC_WORKER"
+service = "hkjc-data-worker"
 
 [[d1_databases]]
 binding = "DB"
