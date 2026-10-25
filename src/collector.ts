@@ -102,11 +102,14 @@ export async function collectWorker(env: Env, fetchImpl: typeof fetch = fetch): 
     report.requests++;
     let response: Response;
     try {
+      // Workers do not implement redirect:"error" (TypeError on Request construct).
+      // Use manual and refuse 3xx without following.
       response = await doFetch(url.toString(), {
         headers: { Authorization: `Bearer ${env.HKJC_API_TOKEN}`, "User-Agent": "hkjc-agent-runner/collector", Accept: "application/json" },
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10_000),
       });
+      if (response.status >= 300 && response.status < 400) throw new Error(String(response.status));
       if (!response.ok) throw new Error(String(response.status));
       // Bound both declared and streamed bodies; never log error bodies or headers.
       if (Number(response.headers.get("Content-Length")) > MAX_BYTES) throw new Error("size");

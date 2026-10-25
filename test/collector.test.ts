@@ -351,8 +351,7 @@ describe("collectWorker", () => {
 
   it("uses HKJC_WORKER service binding when present and skips global fetch", async () => {
     const db = await freshDb();
-    const date = hktToday();
-    const bindingFetch = vi.fn(async (input: RequestInfo | URL) => {
+    const bindingFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       if (url.pathname === "/v1/meetings") return meetings([]);
       throw new Error(`unexpected ${url.pathname}`);
@@ -375,7 +374,7 @@ describe("collectWorker", () => {
     expect(calledUrl.pathname).toBe("/v1/meetings");
     const headers = new Headers(call[1]?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(call[1]?.redirect).toBe("error");
+    expect(call[1]?.redirect).toBe("manual");
   });
 
   it("falls back to global fetch when HKJC_WORKER binding is absent", async () => {
@@ -392,7 +391,9 @@ describe("collectWorker", () => {
     expect(result.skipped).toBe(false);
     expect(result.requests).toBe(1);
     expect(requests).toHaveLength(1);
+    expect(requests[0].url.origin).toBe(API_BASE);
     expect(requests[0].url.pathname).toBe("/v1/meetings");
+    expect(requests[0].init?.redirect).toBe("manual");
   });
 
   it.each([
@@ -402,9 +403,7 @@ describe("collectWorker", () => {
       err.name = "TimeoutError";
       throw err;
     }, "timeout"],
-    ["redirect", () => {
-      throw new TypeError("fetch failed: Redirect was not allowed");
-    }, "redirect"],
+    ["302", () => new Response(null, { status: 302, headers: { Location: "https://example.invalid/" } }), "302"],
     ["network", () => {
       throw new TypeError("fetch failed");
     }, "network"],
@@ -427,6 +426,33 @@ describe("collectWorker", () => {
     ).first<{ value: string }>();
     expect(JSON.parse(meta!.value)).toMatchObject({ reason });
     expect(meta!.value).not.toContain(TOKEN);
+  });
+
+  it("records a 3xx response as a coarse failure without following the redirect", async () => {
+    const db = await freshDb();
+    let followed = false;
+    const { fetchImpl, requests } = routeFetch((url) => {
+      if (url.hostname === "example.invalid") {
+        followed = true;
+        return meetings([]);
+      }
+      if (url.pathname === "/v1/meetings") {
+        return new Response(null, { status: 301, headers: { Location: "https://example.invalid/v1/meetings" } });
+      }
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+
+    await expect(collectWorker(envFor(db, { HKJC_COLLECT_MAX_REQUESTS: "1" }), fetchImpl))
+      .rejects.toThrow("collector: source request failed (301)");
+
+    expect(followed).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].init?.redirect).toBe("manual");
+    const meta = await db.prepare(
+      `SELECT value FROM runner_meta WHERE key = 'last_collection_error'`,
+    ).first<{ value: string }>();
+    expect(JSON.parse(meta!.value)).toMatchObject({ reason: "301" });
+    expect(await eventRows(db)).toEqual([]);
   });
 
   it("exposes last_collection_error on /health", async () => {
